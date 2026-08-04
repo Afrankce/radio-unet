@@ -1,4 +1,9 @@
 *.pt
+*.zip
+*.zip.part
 RadioMapSeer/
 results/
+runs/
 __pycache__/
+.pytest_cache/
+.hf-cache/
