@@ -2,7 +2,7 @@
 
 ## 1. Objective
 
-Adapt the open-source RadioFlow implementation to the public dataset released with arXiv:2603.06401, then train and evaluate six independent static radio-map (SRM) models:
+Adapt the mandatory upstream framework [Hxxxz0/RadioFlow](https://github.com/Hxxxz0/RadioFlow), starting from upstream commit `8944e3160f6a7a85b5451ae58e337186a4d98771`, to the public dataset released with arXiv:2603.06401, then train and evaluate six independent static radio-map (SRM) models:
 
 | Array | Lite | Large |
 | --- | --- | --- |
@@ -16,7 +16,9 @@ This phase covers static SRM only. It does not claim to evaluate RadioFlow's dyn
 
 ## 2. Reproducibility Boundary
 
-- RadioFlow repository: `E:\RadioFlow`.
+- Mandatory framework: `https://github.com/Hxxxz0/RadioFlow.git`.
+- Local RadioFlow repository: `E:\RadioFlow`.
+- Upstream implementation baseline: commit `8944e3160f6a7a85b5451ae58e337186a4d98771` (`origin/main` when this design was approved).
 - Python environment: `D:\Anaconda3\envs\radioflow-win` (Python 3.10, PyTorch 2.5.1+cu121).
 - Target device: NVIDIA RTX A2000 Laptop GPU with 8 GiB VRAM.
 - Dataset root: `E:\datasets\MultiConfigRadiomap` outside the Git repository.
@@ -100,9 +102,29 @@ The condition tensor has three channels at 256x256 resolution, ordered as:
 - Building and invalid cells are set to zero in the normalized target but excluded from all losses and reported accuracy metrics by `valid_mask`.
 - Metadata includes the scene ID, array dimensions, beam ID, steering angle, configuration ID, frequency, and source paths.
 
-## 5. Model and Training
+## 5. Mandatory RadioFlow Framework and Training
 
-### 5.1 Model boundary
+### 5.1 Framework lock
+
+All learned models, flow-matching training, CFG behavior, and ODE generation must use Hxxxz0/RadioFlow. The arXiv:2603.06401 repository is a data-format and preprocessing reference only; its released UNet/GAN models and checkpoints must not replace RadioFlow.
+
+The implementation must reuse these RadioFlow components:
+
+```text
+model/model.py::DiffUNet
+model/unet/basic_unet.py::BasicUNetEncoder
+model/unet/basic_unet_denose.py::BasicUNetDe
+torchcfm.conditional_flow_matching::ConditionalFlowMatcher
+DiffUNet.forward_with_cfg
+train.py::EMA behavior
+RadioFlow Euler/ODE generation path
+```
+
+Allowed adaptations are limited to the multi-configuration dataset adapter, manifest generation, three-channel conditioning, valid-mask-aware loss/metrics, run configuration, checkpoint safety, gradient accumulation, AMP, and optional activation checkpointing for the unchanged Large network.
+
+The implementation must not substitute another UNet, GAN, diffusion model, transformer, official 2603 baseline model, or newly designed architecture. Activation checkpointing may change execution strategy but must not change layers, channels, parameters, or numerical model definition.
+
+### 5.2 Model boundary
 
 The existing `DiffUNet` remains the model family. It receives `condition` with three channels, a one-channel flow state `x_t`, and time `t`, and predicts a one-channel velocity field. Array dimensions are not encoded as image dimensions; the configuration-specific beam map provides the physical spatial condition.
 
@@ -113,7 +135,9 @@ Lite:  (32, 32, 64, 128, 256, 32)
 Large: (128, 128, 256, 512, 1024, 128)
 ```
 
-### 5.2 Masked flow-matching objective
+With three condition channels, the expected parameter counts at the locked upstream baseline are 3,994,859 for Lite and 54,126,059 for Large. Automated regression tests must reject unintended architecture changes that alter these counts.
+
+### 5.3 Masked flow-matching objective
 
 Training uses conditional flow matching and minimizes mean squared velocity error only on valid target cells:
 
@@ -124,7 +148,7 @@ loss = sum(valid_mask * (predicted_velocity - target_velocity)^2)
 
 A batch with no valid cell is a data error and terminates the run.
 
-### 5.3 Shared optimizer recipe
+### 5.4 Shared optimizer recipe
 
 ```text
 optimizer: AdamW
@@ -147,7 +171,7 @@ Lite uses micro-batch 2 and eight-step gradient accumulation. Large uses micro-b
 
 No run may silently change resolution, model width, selected scenes, selected beams, or effective batch size.
 
-### 5.4 Execution order and recovery
+### 5.5 Execution order and recovery
 
 1. Validate manifests and one decoded sample per split/array.
 2. Run CPU unit tests.
@@ -204,7 +228,7 @@ The final report contains one six-row comparison table for 8x8/16x16/32x32 Lite 
 
 ## 7. Code Structure
 
-The original RadioMapSeer entry points remain available. Multi-configuration support is added through focused modules:
+The original Hxxxz0/RadioFlow RadioMapSeer entry points remain available. Multi-configuration support is added as an adapter layer around the existing RadioFlow model and flow-matching machinery through focused modules:
 
 ```text
 data_loaders/multiconfig.py
@@ -216,7 +240,9 @@ evaluate_multiconfig.py
 tests/
 ```
 
-Existing model files receive only the changes required for three condition channels and optional Large gradient checkpointing. Dataset-specific parsing, metrics, and experiment orchestration do not go into the model module.
+The existing `DiffUNet(con_channels=3, model_size=...)` interface already supports the required three condition channels. Model files must remain architecture-identical; the only permitted model-side addition is an execution-only activation-checkpoint hook for Large that does not change layers, state-dict keys, channels, or parameter counts. Dataset-specific parsing, metrics, and experiment orchestration do not go into the model module.
+
+`train_multiconfig.py` and `evaluate_multiconfig.py` are RadioFlow entry points: both instantiate `model.model.DiffUNet`, use its Lite/Large feature definitions, and preserve RadioFlow conditional flow matching, CFG, EMA, and Euler/ODE sampling. They are not a separate modeling framework.
 
 ## 8. Failure Handling
 
@@ -241,7 +267,9 @@ Automated tests must prove:
 - synthetic perfect predictions yield zero dB error and expected image metrics;
 - checkpoint save/resume restores optimizer, scheduler, EMA, scaler, counters, and RNG state;
 - missing or incompatible checkpoints fail evaluation;
-- a one-batch train-save-resume-evaluate integration path succeeds.
+- a one-batch train-save-resume-evaluate integration path succeeds;
+- Lite and Large instantiate the locked Hxxxz0/RadioFlow `DiffUNet` implementation with parameter counts 3,994,859 and 54,126,059 respectively for three condition channels;
+- training uses `ConditionalFlowMatcher`, and evaluation uses the RadioFlow CFG plus Euler/ODE path rather than an official 2603 UNet/GAN baseline.
 
 The implementation phase is accepted when the data adapter and manifests pass all tests, Lite completes the staged training/evaluation path, and Large either completes the same path or is accompanied by reproducible full-resolution OOM evidence under the approved memory strategy.
 
@@ -252,3 +280,4 @@ The implementation phase is accepted when the data adapter and manifests pass al
 - Cross-array joint training or cross-configuration zero-shot generalization.
 - New Sionna ray tracing or modification of released propagation labels.
 - Comparison using unequal frequencies, unequal steering-angle sets, or random image-level splits.
+- Replacement of Hxxxz0/RadioFlow with the arXiv:2603.06401 UNet/GAN baselines or any other learned architecture.
