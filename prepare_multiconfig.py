@@ -12,6 +12,7 @@ from experiments.multiconfig_download import (
     extract_official_dataset,
 )
 from experiments.multiconfig_manifest import (
+    build_manifest_artifacts,
     freeze_schema_lock,
     verify_schema_lock,
     write_audit_report,
@@ -41,6 +42,10 @@ def _parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify-schema")
     verify.add_argument("--dataset-root", type=Path, required=True)
     verify.add_argument("--schema", type=Path, required=True)
+    manifests = subparsers.add_parser("build-manifests")
+    manifests.add_argument("--dataset-root", type=Path, required=True)
+    manifests.add_argument("--schema", type=Path, required=True)
+    manifests.add_argument("--manifest-dir", type=Path, required=True)
     return parser
 
 
@@ -100,6 +105,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary = verify_schema_lock(
             dataset_root,
             arguments.schema,
+            progress=True,
+        )
+        print(json.dumps(summary, sort_keys=True))
+        return 0
+    if arguments.command == "build-manifests":
+        summary = build_manifest_artifacts(
+            dataset_root,
+            arguments.schema,
+            arguments.manifest_dir,
+            verify_schema=True,
             progress=True,
         )
         print(json.dumps(summary, sort_keys=True))

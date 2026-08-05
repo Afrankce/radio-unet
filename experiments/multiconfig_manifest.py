@@ -4,6 +4,7 @@ import ast
 import json
 import math
 import os
+import random
 import re
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -73,6 +74,14 @@ class ExistingSchemaMismatchError(RuntimeError):
     """An immutable audit or schema file already exists with other bytes."""
 
 
+class SplitContractError(RuntimeError):
+    """The permanent 560/80/160 scene split violates its fixed contract."""
+
+
+class ManifestContractError(RuntimeError):
+    """A per-array manifest violates its immutable sample contract."""
+
+
 @dataclass(frozen=True)
 class BeamSpec:
     beam_id: int
@@ -87,6 +96,103 @@ class ArraySpec:
     tx_elements: int
     frequency_hz: int
     beams: tuple[BeamSpec, ...]
+
+
+@dataclass(frozen=True)
+class SceneSplit:
+    seed: int
+    algorithm: str
+    train: tuple[str, ...]
+    val: tuple[str, ...]
+    test: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "SceneSplit":
+        try:
+            seed = int(payload["seed"])
+            algorithm = str(payload["algorithm"])
+            train = tuple(str(value) for value in payload["train"])
+            val = tuple(str(value) for value in payload["val"])
+            test = tuple(str(value) for value in payload["test"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SplitContractError(f"invalid scene split: {error}") from error
+        return cls(
+            seed=seed,
+            algorithm=algorithm,
+            train=train,
+            val=val,
+            test=test,
+        )
+
+
+@dataclass(frozen=True)
+class ManifestRecord:
+    sample_key: str
+    split: Literal["train", "val", "test"]
+    scene_id: str
+    array_name: str
+    array_rows: int
+    array_cols: int
+    frequency_hz: int
+    config_id: str
+    beam_id: int
+    steering_deg: float
+    height_path: str
+    beam_map_path: str
+    radiomap_path: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ManifestRecord":
+        expected_keys = {
+            "sample_key",
+            "split",
+            "scene_id",
+            "array_name",
+            "array_rows",
+            "array_cols",
+            "frequency_hz",
+            "config_id",
+            "beam_id",
+            "steering_deg",
+            "height_path",
+            "beam_map_path",
+            "radiomap_path",
+        }
+        if set(payload) != expected_keys:
+            raise ManifestContractError(
+                "manifest record keys mismatch: "
+                f"missing={sorted(expected_keys - set(payload))}, "
+                f"extra={sorted(set(payload) - expected_keys)}"
+            )
+        split = payload["split"]
+        if split not in ("train", "val", "test"):
+            raise ManifestContractError(f"invalid record split: {split}")
+        try:
+            return cls(
+                sample_key=str(payload["sample_key"]),
+                split=split,
+                scene_id=str(payload["scene_id"]),
+                array_name=str(payload["array_name"]),
+                array_rows=int(payload["array_rows"]),
+                array_cols=int(payload["array_cols"]),
+                frequency_hz=int(payload["frequency_hz"]),
+                config_id=str(payload["config_id"]),
+                beam_id=int(payload["beam_id"]),
+                steering_deg=float(payload["steering_deg"]),
+                height_path=str(payload["height_path"]),
+                beam_map_path=str(payload["beam_map_path"]),
+                radiomap_path=str(payload["radiomap_path"]),
+            )
+        except (TypeError, ValueError) as error:
+            raise ManifestContractError(
+                f"invalid manifest record value: {error}"
+            ) from error
 
 
 ARRAY_SPECS: dict[str, ArraySpec] = {
@@ -1263,6 +1369,9 @@ class SampleInventory:
     height_paths: Mapping[str, tuple[str, ...]]
     beam_map_paths: Mapping[tuple[str, int], tuple[str, ...]]
     radiomap_paths: Mapping[tuple[str, int, str], tuple[str, ...]]
+    array_keys: Mapping[str, tuple[tuple[str, int], ...]] = field(
+        default_factory=dict
+    )
 
     def _require_one(
         self,
@@ -1314,6 +1423,37 @@ class SampleInventory:
         )
         return height, beam_map, radiomap
 
+    def scene_ids_by_array(self) -> dict[str, set[str]]:
+        height_scenes = set(self.height_paths)
+        result: dict[str, set[str]] = {}
+        for array_name, keys in self.array_keys.items():
+            if not keys:
+                raise SplitContractError(
+                    f"{array_name}: no selected configuration/beam keys"
+                )
+            per_beam: list[set[str]] = []
+            for config_id, beam_id in keys:
+                scenes = {
+                    scene_id
+                    for candidate_config, candidate_beam, scene_id in (
+                        self.radiomap_paths
+                    )
+                    if candidate_config == config_id
+                    and candidate_beam == beam_id
+                }
+                per_beam.append(scenes)
+            first = per_beam[0]
+            if any(scenes != first for scenes in per_beam[1:]):
+                raise SplitContractError(
+                    f"{array_name}: scene sets differ across selected beams"
+                )
+            if first != height_scenes:
+                raise SplitContractError(
+                    f"{array_name}: radiomap scenes differ from height scenes"
+                )
+            result[array_name] = set(first)
+        return result
+
 
 def resolve_sample_paths(
     inventory: SampleInventory,
@@ -1353,11 +1493,15 @@ def inventory_samples(
     radiomap_paths: dict[tuple[str, int, str], list[str]] = {}
     expected_angle_by_key: dict[tuple[str, int], float] = {}
     selected_keys: list[tuple[str, int]] = []
+    array_keys: dict[str, list[tuple[str, int]]] = {}
     for array in schema.arrays:
         if not isinstance(array, Mapping):
             raise SchemaIdentityError("array record must be an object")
         configuration_id = array.get("configuration_id")
+        array_name = array.get("name")
         selected_beams = array.get("selected_beams")
+        if not isinstance(array_name, str) or array_name not in ARRAY_SPECS:
+            raise SchemaIdentityError(f"invalid array name: {array_name}")
         if not isinstance(configuration_id, str) or not configuration_id:
             raise SchemaIdentityError(
                 "array configuration_id must be a non-empty string"
@@ -1381,6 +1525,7 @@ def inventory_samples(
                 )
             expected_angle_by_key[key] = steering_deg
             selected_keys.append(key)
+            array_keys.setdefault(array_name, []).append(key)
             beam_directory = data_root / "beam_maps" / configuration_id / "u0"
             for path in sorted(
                 beam_directory.glob(f"beam_{beam_id:02d}_angle_*_matrix.npy"),
@@ -1431,6 +1576,9 @@ def inventory_samples(
         radiomap_paths={
             key: tuple(values) for key, values in radiomap_paths.items()
         },
+        array_keys={
+            key: tuple(values) for key, values in array_keys.items()
+        },
     )
     if not height_paths:
         raise MissingSamplePathError("no released height maps were found")
@@ -1468,6 +1616,461 @@ def inventory_samples(
         for scene_id in scene_ids:
             inventory.require_unique_triplet(key[0], key[1], scene_id)
     return inventory
+
+
+def _natural_key(value: str) -> tuple[tuple[int, object], ...]:
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in re.split(r"(\d+)", value)
+        if part
+    )
+
+
+def natural_sorted(values: object) -> list[str]:
+    return sorted((str(value) for value in values), key=_natural_key)
+
+
+def _validated_scene_sets(inventory: object) -> dict[str, set[str]]:
+    if not hasattr(inventory, "scene_ids_by_array"):
+        raise SplitContractError("inventory cannot report scenes by array")
+    reported = inventory.scene_ids_by_array()
+    if not isinstance(reported, Mapping):
+        raise SplitContractError("scene_ids_by_array must return a mapping")
+    if set(reported) != set(ARRAY_SPECS):
+        raise SplitContractError(
+            "scene arrays mismatch: "
+            f"expected={sorted(ARRAY_SPECS)}, got={sorted(reported)}"
+        )
+    scene_sets: dict[str, set[str]] = {}
+    for array_name in ARRAY_SPECS:
+        raw_values = reported[array_name]
+        values = list(raw_values)
+        unique = set(values)
+        if len(values) != len(unique):
+            raise SplitContractError(
+                f"{array_name}: duplicate scene identifiers"
+            )
+        if len(unique) != 800:
+            raise SplitContractError(
+                f"{array_name}: expected 800 unique scenes, got {len(unique)}"
+            )
+        if any(re.fullmatch(r"u[1-9]\d*", scene_id) is None for scene_id in unique):
+            raise SplitContractError(
+                f"{array_name}: invalid scene identifier"
+            )
+        scene_sets[array_name] = unique
+    if not (
+        scene_sets["8x8"]
+        == scene_sets["16x16"]
+        == scene_sets["32x32"]
+    ):
+        raise SplitContractError("scene sets differ across arrays")
+    return scene_sets
+
+
+def build_scene_split(inventory: object) -> SceneSplit:
+    scene_sets = _validated_scene_sets(inventory)
+    ordered = natural_sorted(scene_sets["8x8"])
+    random.Random(42).shuffle(ordered)
+    split = SceneSplit(
+        seed=42,
+        algorithm="python_random_v1",
+        train=tuple(ordered[:560]),
+        val=tuple(ordered[560:640]),
+        test=tuple(ordered[640:800]),
+    )
+    validate_scene_split(split, inventory)
+    return split
+
+
+def validate_scene_split(split: SceneSplit, inventory: object) -> None:
+    if split.seed != 42:
+        raise SplitContractError(
+            f"scene split seed mismatch: expected 42, got {split.seed}"
+        )
+    if split.algorithm != "python_random_v1":
+        raise SplitContractError(
+            "scene split algorithm mismatch: "
+            f"expected python_random_v1, got {split.algorithm}"
+        )
+    if (len(split.train), len(split.val), len(split.test)) != (560, 80, 160):
+        raise SplitContractError(
+            "scene split counts must be exactly 560/80/160"
+        )
+    train = set(split.train)
+    val = set(split.val)
+    test = set(split.test)
+    if (
+        len(train) != len(split.train)
+        or len(val) != len(split.val)
+        or len(test) != len(split.test)
+    ):
+        raise SplitContractError("scene split contains duplicate scene identifiers")
+    if train & val or train & test or val & test:
+        raise SplitContractError("scene split partitions are not disjoint")
+    scene_sets = _validated_scene_sets(inventory)
+    if train | val | test != scene_sets["8x8"]:
+        raise SplitContractError(
+            "scene split universe does not match the released scene universe"
+        )
+
+
+def load_or_create_scene_split(
+    path: Path,
+    inventory: object,
+) -> SceneSplit:
+    path = Path(path)
+    if path.exists():
+        payload = _read_json_object(path, label="scene split")
+        split = SceneSplit.from_dict(payload)
+        validate_scene_split(split, inventory)
+        return split
+    split = build_scene_split(inventory)
+    _write_immutable_json(path, split.to_dict())
+    return split
+
+
+def _locked_array_record(
+    schema: DatasetSchemaLock,
+    array_name: str,
+) -> tuple[Mapping[str, Any], str]:
+    if array_name not in ARRAY_SPECS:
+        raise ManifestContractError(f"unknown benchmark array: {array_name}")
+    matches = [
+        item
+        for item in schema.arrays
+        if isinstance(item, Mapping) and item.get("name") == array_name
+    ]
+    if len(matches) != 1:
+        raise ManifestContractError(
+            f"expected one locked array record for {array_name}, got {len(matches)}"
+        )
+    record = matches[0]
+    spec = ARRAY_SPECS[array_name]
+    expected_scalars = {
+        "rows": spec.rows,
+        "cols": spec.cols,
+        "tx_elements": spec.tx_elements,
+        "frequency_hz": spec.frequency_hz,
+    }
+    for key, expected in expected_scalars.items():
+        if record.get(key) != expected:
+            raise ManifestContractError(
+                f"locked {array_name} {key} mismatch: "
+                f"expected {expected}, got {record.get(key)}"
+            )
+    selected = record.get("selected_beams")
+    if not isinstance(selected, list):
+        raise ManifestContractError(
+            f"locked {array_name} selected_beams must be a list"
+        )
+    try:
+        actual_beams = tuple(
+            BeamSpec(int(item["beam_id"]), float(item["steering_deg"]))
+            for item in selected
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ManifestContractError(
+            f"invalid locked beam record for {array_name}: {error}"
+        ) from error
+    if actual_beams != spec.beams:
+        raise ManifestContractError(
+            f"locked selected beams differ from ARRAY_SPECS for {array_name}"
+        )
+    configuration_id = record.get("configuration_id")
+    if not isinstance(configuration_id, str) or not configuration_id:
+        raise ManifestContractError(
+            f"locked {array_name} has no configuration_id"
+        )
+    known_ids = {
+        item.get("configuration_id")
+        for item in schema.configurations
+        if isinstance(item, Mapping)
+    }
+    if configuration_id not in known_ids:
+        raise ManifestContractError(
+            f"locked {array_name} configuration_id is unknown: {configuration_id}"
+        )
+    return record, configuration_id
+
+
+def _split_lookup(split: SceneSplit) -> dict[str, Literal["train", "val", "test"]]:
+    lookup: dict[str, Literal["train", "val", "test"]] = {}
+    for name, scenes in (
+        ("train", split.train),
+        ("val", split.val),
+        ("test", split.test),
+    ):
+        for scene_id in scenes:
+            if scene_id in lookup:
+                raise SplitContractError(
+                    f"scene appears in multiple split partitions: {scene_id}"
+                )
+            lookup[scene_id] = name
+    return lookup
+
+
+def _relative_workspace_path(path: Path, workspace_root: Path) -> str:
+    path = Path(path)
+    try:
+        relative = path.relative_to(workspace_root)
+    except ValueError as error:
+        raise ManifestContractError(
+            f"sample path escapes workspace root: {path}"
+        ) from error
+    value = relative.as_posix()
+    pure = PurePosixPath(value)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ManifestContractError(f"unsafe manifest path: {value}")
+    return value
+
+
+def build_manifest(
+    inventory: object,
+    schema: DatasetSchemaLock,
+    split: SceneSplit,
+    array_name: str,
+) -> tuple[ManifestRecord, ...]:
+    validate_scene_split(split, inventory)
+    record, configuration_id = _locked_array_record(schema, array_name)
+    spec = ARRAY_SPECS[array_name]
+    lookup = _split_lookup(split)
+    workspace_root = Path(inventory.workspace_root).resolve()
+    records: list[ManifestRecord] = []
+    for scene_id in natural_sorted(lookup):
+        for beam in sorted(spec.beams, key=lambda item: item.beam_id):
+            height, beam_map, radiomap = inventory.require_unique_triplet(
+                configuration_id,
+                beam.beam_id,
+                scene_id,
+            )
+            records.append(
+                ManifestRecord(
+                    sample_key=(
+                        f"{scene_id}|{array_name}|beam{beam.beam_id:02d}"
+                    ),
+                    split=lookup[scene_id],
+                    scene_id=scene_id,
+                    array_name=array_name,
+                    array_rows=int(record["rows"]),
+                    array_cols=int(record["cols"]),
+                    frequency_hz=int(record["frequency_hz"]),
+                    config_id=configuration_id,
+                    beam_id=beam.beam_id,
+                    steering_deg=beam.steering_deg,
+                    height_path=_relative_workspace_path(height, workspace_root),
+                    beam_map_path=_relative_workspace_path(
+                        beam_map,
+                        workspace_root,
+                    ),
+                    radiomap_path=_relative_workspace_path(
+                        radiomap,
+                        workspace_root,
+                    ),
+                )
+            )
+    return tuple(records)
+
+
+def validate_manifest(
+    records: object,
+    inventory: object,
+    schema: DatasetSchemaLock,
+    split: SceneSplit,
+    array_name: str,
+) -> None:
+    values = tuple(records)
+    sample_keys = [record.sample_key for record in values]
+    if len(sample_keys) != len(set(sample_keys)):
+        raise ManifestContractError("manifest contains duplicate sample_key values")
+    logical_keys = [
+        (record.scene_id, record.array_name, record.beam_id)
+        for record in values
+    ]
+    if len(logical_keys) != len(set(logical_keys)):
+        raise ManifestContractError("manifest contains duplicate logical samples")
+    radiomap_paths = [record.radiomap_path for record in values]
+    if len(radiomap_paths) != len(set(radiomap_paths)):
+        raise ManifestContractError("manifest contains duplicate radiomap paths")
+    allowed_beams = {beam.beam_id for beam in ARRAY_SPECS[array_name].beams}
+    for record in values:
+        if record.beam_id not in allowed_beams:
+            raise ManifestContractError(
+                f"manifest contains incorrect beam {record.beam_id}"
+            )
+        if record.array_name != array_name:
+            raise ManifestContractError(
+                f"manifest array mismatch: {record.array_name}"
+            )
+    expected = build_manifest(inventory, schema, split, array_name)
+    if len(values) != 6400:
+        raise ManifestContractError(
+            f"manifest record count mismatch: expected 6400, got {len(values)}"
+        )
+    if values != expected:
+        mismatch = next(
+            (
+                index
+                for index, (actual, wanted) in enumerate(zip(values, expected))
+                if actual != wanted
+            ),
+            min(len(values), len(expected)),
+        )
+        raise ManifestContractError(
+            f"manifest differs from locked inventory at record {mismatch}"
+        )
+    split_counts = {
+        name: sum(record.split == name for record in values)
+        for name in ("train", "val", "test")
+    }
+    if split_counts != {"train": 4480, "val": 640, "test": 1280}:
+        raise ManifestContractError(
+            f"manifest split counts mismatch: {split_counts}"
+        )
+
+
+def _write_immutable_bytes(path: Path, payload: bytes) -> None:
+    path = Path(path)
+    if path.exists():
+        if path.read_bytes() != payload:
+            raise ExistingSchemaMismatchError(
+                f"immutable file already exists with different bytes: {path}"
+            )
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("wb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def write_manifest_jsonl(
+    path: Path,
+    records: object,
+) -> None:
+    payload = b"".join(
+        canonical_json_bytes(record.to_dict()) for record in tuple(records)
+    )
+    _write_immutable_bytes(Path(path), payload)
+
+
+def load_manifest_jsonl(path: Path) -> tuple[ManifestRecord, ...]:
+    records: list[ManifestRecord] = []
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ManifestContractError(f"cannot read manifest {path}: {error}") from error
+    if not lines:
+        raise ManifestContractError(f"manifest is empty: {path}")
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ManifestContractError(
+                f"invalid JSONL at {path}:{line_number}: {error}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise ManifestContractError(
+                f"manifest record is not an object at {path}:{line_number}"
+            )
+        records.append(ManifestRecord.from_dict(payload))
+    return tuple(records)
+
+
+def build_visualization_cases(split: SceneSplit) -> dict[str, Any]:
+    if len(split.test) != 160:
+        raise SplitContractError(
+            f"visualization cases require 160 test scenes, got {len(split.test)}"
+        )
+    scenes = natural_sorted(split.test)
+    indices = (0, 53, 106, 159)
+    return {
+        "schema_version": 1,
+        "seed": split.seed,
+        "split": "test",
+        "selection": "natural_test_quantiles_v1",
+        "scene_ids": [scenes[index] for index in indices],
+        "steering_deg": [-28.0, 0.0, 21.0],
+    }
+
+
+def build_manifest_artifacts(
+    dataset_root: Path,
+    schema_path: Path,
+    manifest_dir: Path,
+    *,
+    verify_schema: bool = True,
+    progress: bool = False,
+) -> dict[str, Any]:
+    workspace_root = Path(dataset_root).resolve()
+    schema_path = Path(schema_path).resolve()
+    manifest_dir = Path(manifest_dir).resolve()
+    if verify_schema:
+        verify_schema_lock(
+            workspace_root,
+            schema_path,
+            progress=progress,
+        )
+    schema = load_schema_lock(schema_path)
+    inventory = inventory_samples(workspace_root, schema)
+    split_path = manifest_dir / "scene_split_seed42.json"
+    split = load_or_create_scene_split(split_path, inventory)
+    manifests: dict[str, dict[str, Any]] = {}
+    for array_name in ARRAY_SPECS:
+        records = build_manifest(
+            inventory,
+            schema,
+            split,
+            array_name,
+        )
+        validate_manifest(
+            records,
+            inventory,
+            schema,
+            split,
+            array_name,
+        )
+        manifest_path = manifest_dir / f"manifest_{array_name}.jsonl"
+        write_manifest_jsonl(manifest_path, records)
+        written = load_manifest_jsonl(manifest_path)
+        validate_manifest(
+            written,
+            inventory,
+            schema,
+            split,
+            array_name,
+        )
+        manifests[array_name] = {
+            "path": str(manifest_path),
+            "sha256": sha256_file(manifest_path),
+            "records": len(written),
+        }
+    visualization_path = manifest_dir / "visualization_cases_seed42.json"
+    visualization = build_visualization_cases(split)
+    _write_immutable_json(visualization_path, visualization)
+    return {
+        "manifest_dir": str(manifest_dir),
+        "scene_split": {
+            "path": str(split_path),
+            "sha256": sha256_file(split_path),
+            "train": len(split.train),
+            "val": len(split.val),
+            "test": len(split.test),
+        },
+        "manifests": manifests,
+        "visualization_cases": {
+            "path": str(visualization_path),
+            "sha256": sha256_file(visualization_path),
+            "scenes": len(visualization["scene_ids"]),
+            "angles": len(visualization["steering_deg"]),
+        },
+    }
 
 
 def _inventory_schema(report: ConfigAuditReport) -> DatasetSchemaLock:
