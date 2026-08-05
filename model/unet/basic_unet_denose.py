@@ -14,6 +14,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint_utils
 from monai.networks.blocks import Convolution, UpSample
 from monai.networks.layers.factories import Conv, Pool
 from monai.utils import deprecated_arg, ensure_tuple_rep
@@ -498,6 +499,7 @@ class BasicUNetDe(nn.Module):
         attention_heads: int = 4,
         attention_downsample: int = 8,
         dimensions: Optional[int] = None,
+        activation_checkpointing: bool = False,
     ):
         """
         A UNet implementation with 1D/2D/3D supports.
@@ -536,6 +538,9 @@ class BasicUNetDe(nn.Module):
         super().__init__()
         if dimensions is not None:
             spatial_dims = dimensions
+        if type(activation_checkpointing) is not bool:
+            raise ValueError("activation_checkpointing must be boolean")
+        self.activation_checkpointing = activation_checkpointing
 
         self.use_cross_attention = use_cross_attention
         fea = ensure_tuple_rep(features, 6)
@@ -571,6 +576,20 @@ class BasicUNetDe(nn.Module):
             self.cross_attn_3 = CrossAttention(fea[3], fea[3], reduction=16, kernel_size=7)
             self.cross_attn_4 = CrossAttention(fea[4], fea[4], reduction=16, kernel_size=7)
 
+    def _run_block(self, module: nn.Module, *args: torch.Tensor) -> torch.Tensor:
+        if (
+            self.activation_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
+        ):
+            return checkpoint_utils.checkpoint(
+                module,
+                *args,
+                use_reentrant=False,
+                preserve_rng_state=True,
+            )
+        return module(*args)
+
     def forward(self, x: torch.Tensor, t, embeddings=None, image=None):
         """
         Args:
@@ -594,45 +613,45 @@ class BasicUNetDe(nn.Module):
         if image is not None:
             x = torch.cat([image, x], dim=1)
             
-        x0 = self.conv_0(x, temb)
+        x0 = self._run_block(self.conv_0, x, temb)
         if embeddings is not None:
             if self.use_cross_attention:
-                x0 = self.cross_attn_0(x0, embeddings[0])
+                x0 = self._run_block(self.cross_attn_0, x0, embeddings[0])
             else:
                 x0 += embeddings[0]
 
-        x1 = self.down_1(x0, temb)
+        x1 = self._run_block(self.down_1, x0, temb)
         if embeddings is not None:
             if self.use_cross_attention:
-                x1 = self.cross_attn_1(x1, embeddings[1])
+                x1 = self._run_block(self.cross_attn_1, x1, embeddings[1])
             else:
                 x1 += embeddings[1]
 
-        x2 = self.down_2(x1, temb)
+        x2 = self._run_block(self.down_2, x1, temb)
         if embeddings is not None:
             if self.use_cross_attention:
-                x2 = self.cross_attn_2(x2, embeddings[2])
+                x2 = self._run_block(self.cross_attn_2, x2, embeddings[2])
             else:
                 x2 += embeddings[2]
 
-        x3 = self.down_3(x2, temb)
+        x3 = self._run_block(self.down_3, x2, temb)
         if embeddings is not None:
             if self.use_cross_attention:
-                x3 = self.cross_attn_3(x3, embeddings[3])
+                x3 = self._run_block(self.cross_attn_3, x3, embeddings[3])
             else:
                 x3 += embeddings[3]
 
-        x4 = self.down_4(x3, temb)
+        x4 = self._run_block(self.down_4, x3, temb)
         if embeddings is not None:
             if self.use_cross_attention:
-                x4 = self.cross_attn_4(x4, embeddings[4])
+                x4 = self._run_block(self.cross_attn_4, x4, embeddings[4])
             else:
                 x4 += embeddings[4]
 
-        u4 = self.upcat_4(x4, x3, temb)
-        u3 = self.upcat_3(u4, x2, temb)
-        u2 = self.upcat_2(u3, x1, temb)
-        u1 = self.upcat_1(u2, x0, temb)
+        u4 = self._run_block(self.upcat_4, x4, x3, temb)
+        u3 = self._run_block(self.upcat_3, u4, x2, temb)
+        u2 = self._run_block(self.upcat_2, u3, x1, temb)
+        u1 = self._run_block(self.upcat_1, u2, x0, temb)
 
         logits = self.final_conv(u1)
         return logits

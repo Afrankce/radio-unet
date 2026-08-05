@@ -13,6 +13,7 @@ from typing import Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint_utils
 
 from monai.networks.blocks import Convolution, UpSample
 from monai.networks.layers.factories import Conv, Pool
@@ -328,6 +329,7 @@ class BasicUNetEncoder(nn.Module):
         dropout: Union[float, tuple] = 0.0,
         upsample: str = "deconv",
         dimensions: Optional[int] = None,
+        activation_checkpointing: bool = False,
     ):
         """
         A UNet implementation with 1D/2D/3D supports.
@@ -380,6 +382,9 @@ class BasicUNetEncoder(nn.Module):
         super().__init__()
         if dimensions is not None:
             spatial_dims = dimensions
+        if type(activation_checkpointing) is not bool:
+            raise ValueError("activation_checkpointing must be boolean")
+        self.activation_checkpointing = activation_checkpointing
 
         fea = ensure_tuple_rep(features, 6)
         print(f"BasicUNet features: {fea}.")
@@ -389,6 +394,20 @@ class BasicUNetEncoder(nn.Module):
         self.down_2 = Down(spatial_dims, fea[1], fea[2], act, norm, bias, dropout)
         self.down_3 = Down(spatial_dims, fea[2], fea[3], act, norm, bias, dropout)
         self.down_4 = Down(spatial_dims, fea[3], fea[4], act, norm, bias, dropout)
+
+    def _run_block(self, module: nn.Module, *args: torch.Tensor) -> torch.Tensor:
+        if (
+            self.activation_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
+        ):
+            return checkpoint_utils.checkpoint(
+                module,
+                *args,
+                use_reentrant=False,
+                preserve_rng_state=True,
+            )
+        return module(*args)
 
     def forward(self, x: torch.Tensor):
         """
@@ -404,11 +423,11 @@ class BasicUNetEncoder(nn.Module):
         """
 
             
-        x0 = self.conv_0(x)
-        x1 = self.down_1(x0)
-        x2 = self.down_2(x1)
-        x3 = self.down_3(x2)
-        x4 = self.down_4(x3)
+        x0 = self._run_block(self.conv_0, x)
+        x1 = self._run_block(self.down_1, x0)
+        x2 = self._run_block(self.down_2, x1)
+        x3 = self._run_block(self.down_3, x2)
+        x4 = self._run_block(self.down_4, x3)
 
         return [x0, x1, x2, x3, x4]
         

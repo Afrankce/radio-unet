@@ -38,7 +38,7 @@ num_gpus = 1
 device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
 class DiffUNet(nn.Module):
-    def __init__(self, con_channels=2, model_size='lite') -> None:
+    def __init__(self, con_channels=2, model_size='lite', activation_checkpointing=False) -> None:
         """
         Initialize DiffUNet model.
         
@@ -55,6 +55,9 @@ class DiffUNet(nn.Module):
         if model_size not in MODEL_FEATURES:
             raise ValueError(f"model_size must be 'lite' or 'large', got {model_size}")
         features = MODEL_FEATURES[model_size]
+        if type(activation_checkpointing) is not bool:
+            raise ValueError("activation_checkpointing must be boolean")
+        self.activation_checkpointing = activation_checkpointing
         
         self.embed_model = BasicUNetEncoder(
             spatial_dims=2,           # 2D image
@@ -63,7 +66,8 @@ class DiffUNet(nn.Module):
             features=features,
             act=("LeakyReLU", {"negative_slope": 0.1, "inplace": True}),
             norm=("instance", {"affine": True}),
-            bias=True
+            bias=True,
+            activation_checkpointing=activation_checkpointing,
         )
 
         self.model = BasicUNetDe(
@@ -74,7 +78,8 @@ class DiffUNet(nn.Module):
             act=("LeakyReLU", {"negative_slope": 0.1, "inplace": False}),
             norm=("instance", {"affine": True}),
             bias=True,
-            use_cross_attention=True
+            use_cross_attention=True,
+            activation_checkpointing=activation_checkpointing,
         )
         self.cfg_drop_prob = 0.25
 
@@ -194,5 +199,3 @@ def test_diffunet():
 if __name__ == "__main__":
     # 首先运行测试
     test_success = test_diffunet()
-    
-    

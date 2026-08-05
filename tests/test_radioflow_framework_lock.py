@@ -59,3 +59,12 @@ def test_three_channel_model_is_locked_radioflow_diffunet(
     assert sum(parameter.numel() for parameter in network.parameters()) == (
         expected_parameters
     )
+
+
+def test_benchmark_factory_locks_three_condition_channels() -> None:
+    from training.model_factory import build_locked_radioflow
+
+    network = build_locked_radioflow("lite")
+
+    assert network.embed_model.conv_0.conv_0.conv.in_channels == 3
+    assert network.activation_checkpointing is False
