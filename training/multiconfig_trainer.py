@@ -51,6 +51,7 @@ from training.config import (
     MultiConfigTrainConfig,
     TRAIN_SAMPLES,
     VAL_SAMPLES,
+    TEST_SAMPLES,
 )
 from training.hardware_evidence import (
     LargeHardwareGateContext,
