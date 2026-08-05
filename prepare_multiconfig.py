@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from data_loaders.multiconfig import compute_height_stats_artifact
 from experiments.multiconfig_download import (
     EXTRACTION_RECEIPT_NAME,
     OFFICIAL_SOURCE,
@@ -46,6 +47,9 @@ def _parser() -> argparse.ArgumentParser:
     manifests.add_argument("--dataset-root", type=Path, required=True)
     manifests.add_argument("--schema", type=Path, required=True)
     manifests.add_argument("--manifest-dir", type=Path, required=True)
+    height_stats = subparsers.add_parser("compute-height-stats")
+    height_stats.add_argument("--dataset-root", type=Path, required=True)
+    height_stats.add_argument("--manifest-dir", type=Path, required=True)
     return parser
 
 
@@ -118,6 +122,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             progress=True,
         )
         print(json.dumps(summary, sort_keys=True))
+        return 0
+    if arguments.command == "compute-height-stats":
+        schema_path = (
+            Path(__file__).resolve().parent
+            / "experiments"
+            / "multiconfig_schema.json"
+        )
+        output, stats = compute_height_stats_artifact(
+            dataset_root,
+            arguments.manifest_dir.resolve(),
+            schema_path,
+        )
+        print(
+            json.dumps(
+                {
+                    "height_stats": str(output),
+                    "height_max": stats.height_max,
+                    "scene_count": stats.scene_count,
+                    "derived_from": stats.derived_from,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     raise AssertionError(f"unhandled command: {arguments.command}")
 

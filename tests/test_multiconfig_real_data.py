@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+import torch
 
 
 SCHEMA_PATH = Path(__file__).parents[1] / "experiments" / "multiconfig_schema.json"
@@ -112,3 +113,59 @@ def test_real_schema_split_and_manifests_are_strictly_bound() -> None:
         )
     )
     assert visualization == manifest.build_visualization_cases(split)
+
+
+@pytest.mark.dataset
+def test_real_adapter_decodes_every_array_split_and_beam() -> None:
+    from data_loaders.multiconfig import (
+        MultiConfigRadiomapDataset,
+        load_height_stats,
+    )
+    from experiments.multiconfig_manifest import load_schema_lock
+
+    dataset_root = _dataset_root()
+    manifest_dir = dataset_root / "manifests"
+    stats = load_height_stats(manifest_dir / "height_stats_train.json")
+    schema = load_schema_lock(SCHEMA_PATH)
+    expected_lengths = {"train": 4480, "val": 640, "test": 1280}
+
+    for array_name in ("8x8", "16x16", "32x32"):
+        manifest_path = manifest_dir / f"manifest_{array_name}.jsonl"
+        datasets = {
+            split: MultiConfigRadiomapDataset(
+                dataset_root=dataset_root,
+                manifest_path=manifest_path,
+                split=split,
+                schema=schema,
+                height_stats=stats,
+            )
+            for split in ("train", "val", "test")
+        }
+        for split, dataset in datasets.items():
+            assert len(dataset) == expected_lengths[split]
+            sample = dataset[0]
+            assert sample["condition"].shape == (3, 256, 256)
+            assert sample["target"].shape == (1, 256, 256)
+            assert sample["valid_mask"].shape == (1, 256, 256)
+            assert sample["condition"].dtype == torch.float32
+            assert sample["target"].dtype == torch.float32
+            assert sample["valid_mask"].dtype == torch.bool
+            assert bool(torch.isfinite(sample["condition"]).all())
+            assert bool(torch.isfinite(sample["target"]).all())
+            assert bool(sample["valid_mask"].any())
+            assert sample["condition"][0].sum().item() == 1.0
+            assert sample["metadata"]["split"] == split
+            assert sample["metadata"]["array_name"] == array_name
+
+        test_dataset = datasets["test"]
+        fixed_scene = test_dataset.records[0].scene_id
+        scene_indices = [
+            index
+            for index, record in enumerate(test_dataset.records)
+            if record.scene_id == fixed_scene
+        ]
+        assert len(scene_indices) == 8
+        samples = [test_dataset[index] for index in scene_indices]
+        assert len({sample["metadata"]["beam_id"] for sample in samples}) == 8
+        assert len({sample["metadata"]["radiomap_path"] for sample in samples}) == 8
+        assert len({sample["metadata"]["beam_map_path"] for sample in samples}) == 8
