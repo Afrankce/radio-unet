@@ -11,6 +11,11 @@ from experiments.multiconfig_download import (
     download_archive,
     extract_official_dataset,
 )
+from experiments.multiconfig_manifest import (
+    freeze_schema_lock,
+    verify_schema_lock,
+    write_audit_report,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -26,6 +31,16 @@ def _parser() -> argparse.ArgumentParser:
             required=True,
             help="Workspace root on the data volume",
         )
+    audit = subparsers.add_parser("audit-schema")
+    audit.add_argument("--dataset-root", type=Path, required=True)
+    audit.add_argument("--report", type=Path, required=True)
+    freeze = subparsers.add_parser("freeze-schema")
+    freeze.add_argument("--dataset-root", type=Path, required=True)
+    freeze.add_argument("--audit-report", type=Path, required=True)
+    freeze.add_argument("--output", type=Path, required=True)
+    verify = subparsers.add_parser("verify-schema")
+    verify.add_argument("--dataset-root", type=Path, required=True)
+    verify.add_argument("--schema", type=Path, required=True)
     return parser
 
 
@@ -48,6 +63,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if arguments.command == "audit-schema":
+        report = write_audit_report(dataset_root, arguments.report)
+        print(
+            json.dumps(
+                {
+                    "report": str(arguments.report.resolve()),
+                    "text_files": len(report.text_files),
+                    "configurations": len(report.configurations),
+                    "reference_scripts": len(report.reference_scripts),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if arguments.command == "freeze-schema":
+        lock = freeze_schema_lock(
+            dataset_root,
+            arguments.audit_report,
+            arguments.output,
+            progress=True,
+        )
+        print(
+            json.dumps(
+                {
+                    "schema": str(arguments.output.resolve()),
+                    "arrays": len(lock.arrays),
+                    "configurations": len(lock.configurations),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if arguments.command == "verify-schema":
+        summary = verify_schema_lock(
+            dataset_root,
+            arguments.schema,
+            progress=True,
+        )
+        print(json.dumps(summary, sort_keys=True))
         return 0
     raise AssertionError(f"unhandled command: {arguments.command}")
 

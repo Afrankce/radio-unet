@@ -1,0 +1,19 @@
+=== 多波束仿真配置参数 ===
+
+scene_basic:
+  frequency: 6.7GHz
+  frequency_hz: 6700000000.0
+transmitter_array:
+  num_rows: 32
+  num_cols: 32
+  total_elements: 1024
+  spacing: 0.5λ
+transmitter:
+  position: [0, 0, 40]
+beam_configuration:
+  num_beams: 64
+  beam_spacing_deg: 1.0
+  start_angle_deg: -32.0
+  end_angle_deg: 31.0
+  coverage_deg: 63.0
+  beam_angles: [列表长度=64]
