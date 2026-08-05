@@ -134,3 +134,18 @@ def test_cli_rejects_simultaneous_pause_and_smoke(tmp_path: Path) -> None:
             ]
         )
 
+def test_cli_accepts_train_scale_0p1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = __import__("train_multiconfig")
+    captured = []
+    monkeypatch.setattr(
+        cli,
+        "run_benchmark_training",
+        lambda cfg, controls, device: captured.append(cfg) or {"status": "ok"},
+    )
+
+    assert cli.main([*_base_arguments(tmp_path), "--train-scale", "0.1"]) == 0
+    assert captured[0].train_scale == 0.1
+    assert captured[0].train_samples == 448

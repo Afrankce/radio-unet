@@ -31,6 +31,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=("lite", "large"),
         required=True,
     )
+    parser.add_argument("--train-scale", type=float, choices=(0.1, 1.0), default=1.0)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--device", required=True)
     parser.add_argument(
@@ -52,6 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dataset_root=arguments.dataset_root,
         manifest_dir=arguments.manifest_dir,
         run_root=arguments.run_root,
+        train_scale=arguments.train_scale,
     )
     controls = InvocationControls(
         resume=arguments.resume,
