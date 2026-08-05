@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 
 import pytest
+import torch
 
 from config import MODEL_FEATURES
 from model.model import DiffUNet
@@ -68,3 +69,23 @@ def test_benchmark_factory_locks_three_condition_channels() -> None:
 
     assert network.embed_model.conv_0.conv_0.conv.in_channels == 3
     assert network.activation_checkpointing is False
+
+def test_channel_attention_uses_deterministic_global_max_pool() -> None:
+    """Global max pooling must avoid CUDA-nondeterministic AdaptiveMaxPool2d."""
+
+    from model.unet.basic_unet_denose import ChannelAttention
+
+    module = ChannelAttention(in_channels=16)
+    assert not any(
+        isinstance(child, torch.nn.AdaptiveMaxPool2d)
+        for child in module.modules()
+    )
+    previous = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        tensor = torch.randn(2, 16, 8, 8, requires_grad=True)
+        output = module(tensor)
+        output.square().mean().backward()
+        assert tensor.grad is not None
+    finally:
+        torch.use_deterministic_algorithms(previous)

@@ -53,7 +53,8 @@ class ChannelAttention(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super(ChannelAttention, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
-        self.max_pool = nn.AdaptiveMaxPool2d(1)  # 全局最大池化
+        # 全局最大池化使用 amax 实现：与 AdaptiveMaxPool2d(1) 语义完全等价，
+        # 但后者的 CUDA 反向在确定性算法模式下没有实现，会中断锁定训练。
         self.fc = nn.Sequential(
             nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
             nn.ReLU(),
@@ -63,7 +64,7 @@ class ChannelAttention(nn.Module):
 
     def forward(self, x):
         avg_out = self.fc(self.avg_pool(x))  # 平均池化后通过FC
-        max_out = self.fc(self.max_pool(x))  # 最大池化后通过FC
+        max_out = self.fc(x.amax(dim=(-2, -1), keepdim=True))  # 最大池化后通过FC
         out = avg_out + max_out  # 融合两种池化结果
         return self.sigmoid(out)  # 输出注意力权重
 
