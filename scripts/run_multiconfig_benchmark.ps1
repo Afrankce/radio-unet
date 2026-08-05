@@ -6,8 +6,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $env:CUBLAS_WORKSPACE_CONFIG = ":4096:8"
-$env:RADIOFLOW_RUN_ROOT = $runRoot
-$env:MULTICONFIG_TRAIN_SCALE = "$TrainScale"
 
 $python = "D:\Anaconda3\envs\radioflow-win\python.exe"
 $datasetRoot = "E:\datasets\MultiConfigRadiomap"
@@ -19,6 +17,9 @@ $modelSizes = @("lite", "large")
 $device = "cuda:0"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $largeGate = Join-Path $runRoot "_hardware\large_hardware_gate.json"
+
+$env:RADIOFLOW_RUN_ROOT = $runRoot
+$env:MULTICONFIG_TRAIN_SCALE = "$TrainScale"
 
 function Invoke-JsonCommand {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
