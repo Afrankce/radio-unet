@@ -120,3 +120,21 @@ def test_summarize_cli_accepts_only_run_and_result_roots(
                 "8x8",
             ]
         )
+
+
+def test_evaluation_cli_accepts_train_scale_0p1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = __import__("evaluate_multiconfig")
+    captured = []
+    monkeypatch.setattr(
+        cli,
+        "run_cfg_selection",
+        lambda cfg, device, results_root: captured.append(cfg) or {"status": "ok"},
+    )
+
+    assert cli.main(
+        ["select-cfg", *_common_arguments(tmp_path), "--train-scale", "0.1"]
+    ) == 0
+    assert captured[0].train_scale == 0.1

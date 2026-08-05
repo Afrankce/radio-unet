@@ -38,6 +38,7 @@ RUN_ROOT = Path(
         "RADIOFLOW_RUN_ROOT", r"E:\RadioFlow\runs\srm_6.7ghz_common8"
     )
 )
+TRAIN_SCALE = float(os.environ.get("MULTICONFIG_TRAIN_SCALE", "1.0"))
 
 
 def _cfg(model_size: str) -> MultiConfigTrainConfig:
@@ -47,6 +48,7 @@ def _cfg(model_size: str) -> MultiConfigTrainConfig:
         dataset_root=DATASET_ROOT,
         manifest_dir=MANIFEST_DIR,
         run_root=RUN_ROOT,
+        train_scale=TRAIN_SCALE,
     )
 
 

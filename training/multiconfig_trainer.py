@@ -187,10 +187,11 @@ def preflight_benchmark(cfg: MultiConfigTrainConfig) -> BenchmarkContext:
             split=split,
             schema=schema,
             height_stats=stats,
+            train_scale=cfg.train_scale,
         )
         for split in ("train", "val", "test")
     }
-    expected = {"train": 4480, "val": 640, "test": 1280}
+    expected = {"train": cfg.train_samples, "val": VAL_SAMPLES, "test": TEST_SAMPLES}
     for split, dataset in datasets.items():
         if len(dataset) != expected[split]:
             raise TrainerContractError(
@@ -256,10 +257,10 @@ def build_loaders(
         drop_last=False,
         persistent_workers=False,
     )
-    expected_micro_batches = math.ceil(TRAIN_SAMPLES / cfg.micro_batch_size)
+    expected_micro_batches = math.ceil(cfg.train_samples / cfg.micro_batch_size)
     if len(train_loader) != expected_micro_batches:
         raise TrainerContractError("train DataLoader micro-batch count mismatch")
-    if math.ceil(len(train_loader) / cfg.accumulation_steps) != 280:
+    if math.ceil(len(train_loader) / cfg.accumulation_steps) != cfg.optimizer_steps_per_epoch:
         raise TrainerContractError("train DataLoader optimizer-step count mismatch")
     if len(val_loader) != VAL_SAMPLES:
         raise TrainerContractError("validation DataLoader count mismatch")

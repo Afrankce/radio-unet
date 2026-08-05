@@ -149,3 +149,35 @@ def test_cpu_runtime_records_amp_request_but_disables_scaler(tmp_path: Path) -> 
         "scaler_enabled": False,
     }
 
+
+def test_train_scale_0p1_derives_448_samples_and_28_steps(tmp_path: Path) -> None:
+    module = _config_module()
+    cfg = module.MultiConfigTrainConfig(
+        array_size="8x8",
+        model_size="lite",
+        dataset_root=tmp_path / "dataset",
+        manifest_dir=tmp_path / "manifests",
+        run_root=tmp_path / "runs",
+        train_scale=0.1,
+    )
+
+    assert cfg.train_samples == 448
+    assert cfg.optimizer_steps_per_epoch == 28
+    assert cfg.planned_optimizer_steps == 5_600
+    assert cfg.warmup_steps == 560
+    payload = cfg.scientific_payload()
+    assert payload["train_scale"] == 0.1
+    assert payload["train_samples"] == 448
+    assert payload["full_train_samples"] == 4480
+    assert payload["train_scene_count"] == 560
+    assert payload["train_subsample_rule"] == "sorted_first_n_scenes"
+
+    with pytest.raises(module.TrainConfigError, match="train_scale"):
+        module.MultiConfigTrainConfig(
+            array_size="8x8",
+            model_size="lite",
+            dataset_root=tmp_path,
+            manifest_dir=tmp_path,
+            run_root=tmp_path,
+            train_scale=0.2,
+        )

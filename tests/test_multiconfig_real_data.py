@@ -169,3 +169,51 @@ def test_real_adapter_decodes_every_array_split_and_beam() -> None:
         assert len({sample["metadata"]["beam_id"] for sample in samples}) == 8
         assert len({sample["metadata"]["radiomap_path"] for sample in samples}) == 8
         assert len({sample["metadata"]["beam_map_path"] for sample in samples}) == 8
+
+
+@pytest.mark.dataset
+def test_real_adapter_train_scale_0p1_subsamples_448_samples() -> None:
+    from data_loaders.multiconfig import (
+        MultiConfigRadiomapDataset,
+        load_height_stats,
+    )
+    from experiments.multiconfig_manifest import load_schema_lock
+
+    dataset_root = _dataset_root()
+    manifest_dir = dataset_root / "manifests"
+    stats = load_height_stats(manifest_dir / "height_stats_train.json")
+    schema = load_schema_lock(SCHEMA_PATH)
+    full = MultiConfigRadiomapDataset(
+        dataset_root=dataset_root,
+        manifest_path=manifest_dir / "manifest_8x8.jsonl",
+        split="train",
+        schema=schema,
+        height_stats=stats,
+    )
+    reduced = MultiConfigRadiomapDataset(
+        dataset_root=dataset_root,
+        manifest_path=manifest_dir / "manifest_8x8.jsonl",
+        split="train",
+        schema=schema,
+        height_stats=stats,
+        train_scale=0.1,
+    )
+    val = MultiConfigRadiomapDataset(
+        dataset_root=dataset_root,
+        manifest_path=manifest_dir / "manifest_8x8.jsonl",
+        split="val",
+        schema=schema,
+        height_stats=stats,
+        train_scale=0.1,
+    )
+    assert len(full) == 4480
+    assert len(reduced) == 448
+    assert len(val) == 640
+    full_scenes = sorted({record.scene_id for record in full.records})
+    reduced_scenes = sorted({record.scene_id for record in reduced.records})
+    assert len(full_scenes) == 560
+    assert len(reduced_scenes) == 56
+    assert reduced_scenes == full_scenes[:56]
+    assert Counter(record.beam_id for record in reduced.records) == {
+        beam_id: 56 for beam_id in range(8)
+    }

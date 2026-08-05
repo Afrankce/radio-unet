@@ -1502,6 +1502,7 @@ def _validate_global_large_gate(
             dataset_root=lite_cfg.dataset_root,
             manifest_dir=lite_cfg.manifest_dir,
             run_root=run_root,
+            train_scale=lite_cfg.train_scale,
         )
         config_hashes[array] = large_cfg.config_sha256
         manifest_hashes[array] = by_array[array]["identity"]["manifest_sha256"]

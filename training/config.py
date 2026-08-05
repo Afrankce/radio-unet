@@ -18,6 +18,8 @@ COMMON_ANGLES_DEG = (-28.0, -21.0, -14.0, -7.0, 0.0, 7.0, 14.0, 21.0)
 FREQUENCY_HZ = 6_700_000_000
 CONDITION_CHANNELS = 3
 TRAIN_SAMPLES = 4_480
+TRAIN_SCALES = (1.0, 0.1)
+TRAIN_SCENE_COUNT = 560
 VAL_SAMPLES = 640
 TEST_SAMPLES = 1_280
 
@@ -80,6 +82,7 @@ class MultiConfigTrainConfig:
     dataset_root: Path
     manifest_dir: Path
     run_root: Path
+    train_scale: float = 1.0
     seed: int = 42
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
@@ -100,6 +103,8 @@ class MultiConfigTrainConfig:
             raise TrainConfigError(f"array_size must be one of {ARRAY_SIZES}")
         if self.model_size not in MODEL_SIZES:
             raise TrainConfigError(f"model_size must be one of {MODEL_SIZES}")
+        if self.train_scale not in TRAIN_SCALES or type(self.train_scale) is not float:
+            raise TrainConfigError(f"train_scale must be one of {TRAIN_SCALES}")
         locked: dict[str, Any] = {
             "seed": 42,
             "learning_rate": 1e-3,
@@ -121,6 +126,10 @@ class MultiConfigTrainConfig:
                 )
 
     @property
+    def train_samples(self) -> int:
+        return int(round(TRAIN_SAMPLES * self.train_scale))
+
+    @property
     def micro_batch_size(self) -> int:
         return 2 if self.model_size == "lite" else 1
 
@@ -139,7 +148,7 @@ class MultiConfigTrainConfig:
     @property
     def optimizer_steps_per_epoch(self) -> int:
         return math.ceil(
-            math.ceil(TRAIN_SAMPLES / self.micro_batch_size)
+            math.ceil(self.train_samples / self.micro_batch_size)
             / self.accumulation_steps
         )
 
@@ -163,7 +172,11 @@ class MultiConfigTrainConfig:
             "condition_channels": CONDITION_CHANNELS,
             "frequency_hz": FREQUENCY_HZ,
             "common_angles_deg": list(COMMON_ANGLES_DEG),
-            "train_samples": TRAIN_SAMPLES,
+            "train_samples": self.train_samples,
+            "full_train_samples": TRAIN_SAMPLES,
+            "train_scale": self.train_scale,
+            "train_scene_count": TRAIN_SCENE_COUNT,
+            "train_subsample_rule": "sorted_first_n_scenes",
             "val_samples": VAL_SAMPLES,
             "test_samples": TEST_SAMPLES,
             "seed": self.seed,

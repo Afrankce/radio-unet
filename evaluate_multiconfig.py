@@ -29,6 +29,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         required=True,
     )
     parser.add_argument("--model-size", choices=("lite", "large"), required=True)
+    parser.add_argument("--train-scale", type=float, choices=(0.1, 1.0), default=1.0)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--results-root", type=Path, required=True)
     parser.add_argument("--device", required=True)
@@ -58,6 +59,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dataset_root=arguments.dataset_root,
             manifest_dir=arguments.manifest_dir,
             run_root=arguments.run_root,
+            train_scale=arguments.train_scale,
         )
         device = resolve_device(arguments.device)
         action = run_cfg_selection if arguments.command == "select-cfg" else run_test_evaluation

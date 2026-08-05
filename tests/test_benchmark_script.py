@@ -82,3 +82,15 @@ def test_script_passes_no_scientific_overrides() -> None:
     )
 
     assert all(option not in text for option in forbidden)
+
+
+def test_script_parameterizes_run_suffix_and_train_scale() -> None:
+    text = _text()
+
+    assert "param(" in text
+    assert '[ValidateSet(0.1, 1.0)][double]$TrainScale = 1.0' in text
+    assert '"E:\\RadioFlow\\runs\\srm_6.7ghz_common8$RunSuffix"' in text
+    assert '"E:\\RadioFlow\\results\\srm_6.7ghz_common8$RunSuffix"' in text
+    assert '--train-scale", "$TrainScale"' in text
+    assert '$env:RADIOFLOW_RUN_ROOT = $runRoot' in text
+    assert '$env:MULTICONFIG_TRAIN_SCALE = "$TrainScale"' in text

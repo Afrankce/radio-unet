@@ -178,7 +178,8 @@ def denormalize_db(
     floor_db: float = -300.0,
     ceiling_db: float = 0.0,
 ) -> torch.Tensor:
-    """Invert :func:`normalize_db` for values in [0, 1]."""
+    """Invert :func:
+ormalize_db` for values in [0, 1]."""
 
     floor, ceiling = _require_db_interval(floor_db, ceiling_db)
     return values * (ceiling - floor) + floor
@@ -577,14 +578,18 @@ class MultiConfigRadiomapDataset(Dataset):
         schema: DatasetSchemaLock,
         height_stats: HeightStats,
         output_size: tuple[int, int] = OUTPUT_SIZE,
+        train_scale: float = 1.0,
     ) -> None:
         if split not in ("train", "val", "test"):
             raise DatasetContractError(f"invalid split: {split!r}")
+        if train_scale not in (1.0, 0.1) or type(train_scale) is not float:
+            raise DatasetContractError("train_scale must be 1.0 or 0.1")
         self.dataset_root = Path(dataset_root).resolve()
         self.manifest_path = Path(manifest_path).resolve()
         self.schema = schema
         self.height_stats = height_stats
         self.split = split
+        self.train_scale = train_scale
         if tuple(output_size) != OUTPUT_SIZE:
             raise DatasetContractError(
                 f"fixed output size must be {OUTPUT_SIZE}, got {tuple(output_size)}"
@@ -601,6 +606,10 @@ class MultiConfigRadiomapDataset(Dataset):
             for record in load_manifest_jsonl(self.manifest_path)
             if record.split == split
         )
+        if split == "train" and train_scale < 1.0:
+            scenes = sorted({record.scene_id for record in records})
+            kept = set(scenes[: int(round(len(scenes) * train_scale))])
+            records = tuple(record for record in records if record.scene_id in kept)
         if not records:
             raise DatasetContractError(
                 f"manifest {self.manifest_path} has no {split} samples"

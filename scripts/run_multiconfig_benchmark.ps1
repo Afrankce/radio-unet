@@ -1,12 +1,19 @@
+param(
+    [string]$RunSuffix = "",
+    [ValidateSet(0.1, 1.0)][double]$TrainScale = 1.0
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $env:CUBLAS_WORKSPACE_CONFIG = ":4096:8"
+$env:RADIOFLOW_RUN_ROOT = $runRoot
+$env:MULTICONFIG_TRAIN_SCALE = "$TrainScale"
 
 $python = "D:\Anaconda3\envs\radioflow-win\python.exe"
 $datasetRoot = "E:\datasets\MultiConfigRadiomap"
 $manifestDir = "E:\datasets\MultiConfigRadiomap\manifests"
-$runRoot = "E:\RadioFlow\runs\srm_6.7ghz_common8"
-$resultsRoot = "E:\RadioFlow\results\srm_6.7ghz_common8"
+$runRoot = "E:\RadioFlow\runs\srm_6.7ghz_common8$RunSuffix"
+$resultsRoot = "E:\RadioFlow\results\srm_6.7ghz_common8$RunSuffix"
 $arrays = @("8x8", "16x16", "32x32")
 $modelSizes = @("lite", "large")
 $device = "cuda:0"
@@ -58,6 +65,7 @@ function Invoke-Training {
         "--manifest-dir", $manifestDir,
         "--array", $ArrayName,
         "--model-size", $ModelSize,
+        "--train-scale", "$TrainScale",
         "--run-root", $runRoot,
         "--device", $device
     ) + $Controls
@@ -77,6 +85,7 @@ function Invoke-Evaluation {
         "--manifest-dir", $manifestDir,
         "--array", $ArrayName,
         "--model-size", $ModelSize,
+        "--train-scale", "$TrainScale",
         "--run-root", $runRoot,
         "--results-root", $resultsRoot,
         "--device", $device
