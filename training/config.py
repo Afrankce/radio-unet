@@ -88,7 +88,7 @@ class MultiConfigTrainConfig:
     weight_decay: float = 1e-5
     warmup_ratio: float = 0.10
     ema_decay: float = 0.999
-    max_epochs: int = 200
+    max_epochs: int = 1000
     early_stopping_patience: int = 20
     num_workers: int = 2
     resolution: int = 256
@@ -111,7 +111,7 @@ class MultiConfigTrainConfig:
             "weight_decay": 1e-5,
             "warmup_ratio": 0.10,
             "ema_decay": 0.999,
-            "max_epochs": 200,
+            "max_epochs": 1000,
             "early_stopping_patience": 20,
             "num_workers": 2,
             "resolution": 256,
@@ -135,7 +135,10 @@ class MultiConfigTrainConfig:
 
     @property
     def accumulation_steps(self) -> int:
-        return 8 if self.model_size == "lite" else 16
+        # Reference RadioFlow recipe: ~500 train samples, batch 64 => ~8 optimizer
+        # steps per epoch. With 448 train samples (0.1x), effective batch 56 gives
+        # exactly 8 steps/epoch: lite 2x28, large 1x56.
+        return 28 if self.model_size == "lite" else 56
 
     @property
     def activation_checkpointing(self) -> bool:

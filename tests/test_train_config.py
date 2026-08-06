@@ -15,7 +15,7 @@ def _config_module():
 
 @pytest.mark.parametrize(
     ("model_size", "micro_batch", "accumulation", "checkpointing"),
-    [("lite", 2, 8, False), ("large", 1, 16, True)],
+    [("lite", 2, 28, False), ("large", 1, 56, True)],
 )
 def test_locked_training_config_derives_effective_batch_and_steps(
     tmp_path: Path,
@@ -35,10 +35,10 @@ def test_locked_training_config_derives_effective_batch_and_steps(
 
     assert cfg.micro_batch_size == micro_batch
     assert cfg.accumulation_steps == accumulation
-    assert cfg.effective_batch_size == 16
-    assert cfg.optimizer_steps_per_epoch == 280
-    assert cfg.planned_optimizer_steps == 56_000
-    assert cfg.warmup_steps == 5_600
+    assert cfg.effective_batch_size == 56
+    assert cfg.optimizer_steps_per_epoch == 80
+    assert cfg.planned_optimizer_steps == 80_000
+    assert cfg.warmup_steps == 8_000
     assert cfg.use_amp is True
     assert cfg.activation_checkpointing is checkpointing
 
@@ -162,9 +162,9 @@ def test_train_scale_0p1_derives_448_samples_and_28_steps(tmp_path: Path) -> Non
     )
 
     assert cfg.train_samples == 448
-    assert cfg.optimizer_steps_per_epoch == 28
-    assert cfg.planned_optimizer_steps == 5_600
-    assert cfg.warmup_steps == 560
+    assert cfg.optimizer_steps_per_epoch == 8
+    assert cfg.planned_optimizer_steps == 8_000
+    assert cfg.warmup_steps == 800
     payload = cfg.scientific_payload()
     assert payload["train_scale"] == 0.1
     assert payload["train_samples"] == 448

@@ -45,8 +45,8 @@ def test_cli_builds_locked_config_and_run_path(
     assert cfg.model_size == "lite"
     assert cfg.run_dir == tmp_path / "runs" / "8x8" / "lite"
     assert cfg.micro_batch_size == 2
-    assert cfg.accumulation_steps == 8
-    assert cfg.effective_batch_size == 16
+    assert cfg.accumulation_steps == 28
+    assert cfg.effective_batch_size == 56
     assert controls.resume == "none"
     assert device == torch.device("cpu")
 
@@ -109,8 +109,8 @@ def test_cli_keeps_pause_and_smoke_as_invocation_only_controls(
     assert cli.main([*_base_arguments(tmp_path), "--stop-after-epoch", "5"]) == 0
     pause_cfg, pause = captured.pop()
     assert pause.stop_after_epoch == 5
-    assert pause_cfg.max_epochs == 200
-    assert pause_cfg.planned_optimizer_steps == 56_000
+    assert pause_cfg.max_epochs == 1000
+    assert pause_cfg.planned_optimizer_steps == 80_000
 
     assert cli.main(
         [*_base_arguments(tmp_path), "--smoke-optimizer-steps", "1"]

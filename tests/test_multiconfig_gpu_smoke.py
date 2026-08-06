@@ -81,7 +81,7 @@ def _assert_smoke_receipt(model_size: str, expected_micro_batches: int) -> None:
     assert runtime["smoke_optimizer_steps"] == 1
     assert runtime["optimizer_step"] == 1
     assert runtime["micro_batches_seen"] == expected_micro_batches
-    assert runtime["samples_seen"] == 16
+    assert runtime["samples_seen"] == 56
     assert runtime["amp_requested"] is True
     assert runtime["amp_dtype"] == "float16"
     assert runtime["autocast_enabled"] is True
@@ -99,7 +99,7 @@ def _assert_smoke_receipt(model_size: str, expected_micro_batches: int) -> None:
     state = TrainerState.from_dict(payload["trainer_state"])
     assert state.optimizer_step == 1
     assert state.micro_batches_seen == expected_micro_batches
-    assert state.samples_seen == 16
+    assert state.samples_seen == 56
 
     context = preflight_benchmark(cfg)
     model = build_locked_radioflow(model_size)
@@ -118,7 +118,7 @@ def test_cuda_device_and_lite_complete_optimizer_step_smoke() -> None:
     properties = torch.cuda.get_device_properties(0)
     assert properties.total_memory > 0
 
-    _assert_smoke_receipt("lite", expected_micro_batches=8)
+    _assert_smoke_receipt("lite", expected_micro_batches=28)
 
 
 def test_large_smoke_is_complete_or_has_one_valid_global_oom_gate() -> None:
@@ -136,8 +136,8 @@ def test_large_smoke_is_complete_or_has_one_valid_global_oom_gate() -> None:
         assert payload["parameter_count"] == EXPECTED_PARAMETER_COUNTS["large"]
         assert payload["resolution"] == 256
         assert payload["micro_batch_size"] == 1
-        assert payload["accumulation_steps"] == 16
+        assert payload["accumulation_steps"] == 56
         assert payload["activation_checkpointing"] is True
         return
 
-    _assert_smoke_receipt("large", expected_micro_batches=16)
+    _assert_smoke_receipt("large", expected_micro_batches=56)
