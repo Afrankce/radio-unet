@@ -216,8 +216,16 @@ def _error_cmap():
 def _case_title(
     metadata: Mapping[str, Any], *, model_size: str, cfg_scale: float
 ) -> str:
+    frequency_hz = metadata.get("frequency_hz")
+    frequency_label = ""
+    if frequency_hz is not None:
+        try:
+            frequency_label = f"{float(frequency_hz) / 1_000_000_000:g} GHz | "
+        except (TypeError, ValueError):
+            raise VisualizationInputError("frequency_hz must be numeric when provided")
     return (
-        f"{metadata.get('scene_id', '?')} | {metadata.get('array_name', '?')} | "
+        f"{frequency_label}{metadata.get('scene_id', '?')} | "
+        f"{metadata.get('array_name', '?')} | "
         f"beam {int(metadata.get('beam_id', -1)):02d} "
         f"({float(metadata.get('steering_deg', float('nan'))):g} deg) | "
         f"{str(model_size).title()} | CFG {_compact_number(cfg_scale)}"

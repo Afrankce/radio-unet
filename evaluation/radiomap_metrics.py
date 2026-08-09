@@ -263,6 +263,107 @@ class PerBeamMetricAccumulators:
         return rows
 
 
+class PerFrequencyMetricAccumulators:
+    """Aggregate metrics by physical frequency and steering angle."""
+
+    def __init__(
+        self,
+        expected_groups: Sequence[tuple[int, float]] | None = None,
+    ) -> None:
+        self.overall = MetricAccumulator()
+        self._expected: tuple[tuple[int, float], ...] | None = None
+        self.per_group: dict[tuple[int, float], MetricAccumulator] = {}
+        if expected_groups is not None:
+            normalized: list[tuple[int, float]] = []
+            for frequency_hz, angle in expected_groups:
+                try:
+                    frequency = int(frequency_hz)
+                    steering = float(angle)
+                except (TypeError, ValueError) as error:
+                    raise MetricInputError("frequency/angle groups must be numeric") from error
+                if frequency <= 0 or not math.isfinite(steering):
+                    raise MetricInputError("frequency/angle groups must be finite and positive")
+                normalized.append((frequency, steering))
+            if len(set(normalized)) != len(normalized):
+                raise MetricInputError("frequency/angle groups must be unique")
+            self._expected = tuple(normalized)
+            self.per_group = {
+                key: MetricAccumulator() for key in self._expected
+            }
+
+    @staticmethod
+    def _metadata_group(
+        item: Mapping[str, Any],
+        index: int,
+    ) -> tuple[int, float]:
+        try:
+            frequency = int(item["frequency_hz"])
+            angle = float(item["steering_deg"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise MetricInputError(
+                f"invalid frequency/angle metadata at index {index}"
+            ) from error
+        if frequency <= 0 or not math.isfinite(angle):
+            raise MetricInputError(
+                f"frequency/angle metadata is non-finite at index {index}"
+            )
+        return frequency, angle
+
+    def _resolve_group(self, group: tuple[int, float]) -> tuple[int, float]:
+        if self._expected is None:
+            if group not in self.per_group:
+                self.per_group[group] = MetricAccumulator()
+            return group
+        for expected in self._expected:
+            if group[0] == expected[0] and math.isclose(
+                group[1], expected[1], abs_tol=1e-9
+            ):
+                return expected
+        raise MetricInputError(
+            f"unexpected frequency/angle group: {group[0]} Hz/{group[1]} deg"
+        )
+
+    def update(
+        self,
+        prediction: Tensor,
+        target: Tensor,
+        valid_mask: Tensor,
+        metadata: Sequence[Mapping[str, Any]],
+    ) -> None:
+        if len(metadata) != prediction.shape[0]:
+            raise MetricInputError("metadata count must match metric batch size")
+        group_indices: dict[tuple[int, float], list[int]] = {}
+        for index, item in enumerate(metadata):
+            group = self._resolve_group(self._metadata_group(item, index))
+            group_indices.setdefault(group, []).append(index)
+        self.overall.update(prediction, target, valid_mask)
+        for group, indices in group_indices.items():
+            self.per_group[group].update(
+                prediction[indices],
+                target[indices],
+                valid_mask[indices],
+            )
+
+    def compute_overall(self) -> dict[str, int | float]:
+        return self.overall.compute()
+
+    def compute_rows(self) -> list[dict[str, int | float]]:
+        rows: list[dict[str, int | float]] = []
+        for (frequency_hz, angle) in sorted(
+            self.per_group,
+            key=lambda item: (item[0], item[1]),
+        ):
+            metrics = self.per_group[(frequency_hz, angle)].compute()
+            rows.append(
+                {
+                    "frequency_hz": frequency_hz,
+                    "angle_deg": angle,
+                    **metrics,
+                }
+            )
+        return rows
+
+
 def metrics_for_json(
     metrics: Mapping[str, int | float],
 ) -> dict[str, int | float | bool | None]:
