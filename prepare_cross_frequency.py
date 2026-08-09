@@ -8,12 +8,12 @@ from typing import Any
 from experiments.cross_frequency import (
     build_cross_frequency_records,
     cross_frequency_spec,
+    inventory_cross_frequency_samples,
     select_zero_degree_configurations,
     validate_cross_frequency_records,
 )
 from experiments.multiconfig_manifest import (
     SceneSplit,
-    inventory_samples,
     load_manifest_jsonl,
     load_schema_lock,
     write_manifest_jsonl,
@@ -36,7 +36,6 @@ def build_cross_frequency_manifest_artifact(
     manifest_dir = Path(manifest_dir).resolve()
     output = Path(output_path).resolve() if output_path is not None else manifest_dir / DEFAULT_MANIFEST_NAME
     schema = load_schema_lock(schema_path)
-    inventory = inventory_samples(dataset_root, schema)
     split_path = manifest_dir / "scene_split_seed42.json"
     try:
         payload = json.loads(split_path.read_text(encoding="utf-8"))
@@ -47,6 +46,7 @@ def build_cross_frequency_manifest_artifact(
     split = SceneSplit.from_dict(payload)
     spec = cross_frequency_spec()
     selected = select_zero_degree_configurations(schema)
+    inventory = inventory_cross_frequency_samples(dataset_root, selected)
     records = build_cross_frequency_records(inventory, split, selected, spec)
     validate_cross_frequency_records(
         records,

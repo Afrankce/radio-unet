@@ -3,9 +3,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from experiments.multiconfig_manifest import ManifestRecord, SceneSplit
+from experiments.multiconfig_manifest import (
+    ManifestRecord,
+    MissingSamplePathError,
+    SampleInventory,
+    SceneSplit,
+)
 
 
 TRAIN_FREQUENCY_HZ = 4_900_000_000
@@ -183,6 +188,98 @@ def select_zero_degree_configurations(
             "train and test frequencies must use distinct released configurations"
         )
     return selected
+
+
+def inventory_cross_frequency_samples(
+    workspace_root: Path,
+    selected: Mapping[int, SelectedZeroDegreeConfiguration],
+    *,
+    scene_ids: Sequence[str] | None = None,
+) -> SampleInventory:
+    """Index only the two released configurations used by this experiment."""
+
+    workspace_root = Path(workspace_root).resolve()
+    data_root = workspace_root / "raw" / "Dataset"
+    if not data_root.is_dir():
+        raise CrossFrequencyManifestError(f"cross-frequency data root is missing: {data_root}")
+    if scene_ids is None:
+        discovered = sorted(
+            path.parent.name
+            for path in data_root.glob("height_maps/u*/u*_height_matrix.npy")
+            if path.is_file()
+        )
+        scene_ids = tuple(dict.fromkeys(discovered))
+    scenes = tuple(scene_ids)
+    if not scenes:
+        raise CrossFrequencyManifestError("cross-frequency inventory has no scenes")
+
+    def relative(path: Path) -> str:
+        return _relative_path(path, workspace_root)
+
+    height_paths: dict[str, tuple[str, ...]] = {}
+    for scene_id in scenes:
+        candidates = tuple(
+            path
+            for path in (
+                data_root / "height_maps" / scene_id / f"{scene_id}_height_matrix.npy",
+            )
+            if path.is_file()
+        )
+        if len(candidates) != 1:
+            raise MissingSamplePathError(
+                f"expected one height map for {scene_id}, got {len(candidates)}"
+            )
+        height_paths[scene_id] = (relative(candidates[0]),)
+
+    beam_map_paths: dict[tuple[str, int], tuple[str, ...]] = {}
+    radiomap_paths: dict[tuple[str, int, str], tuple[str, ...]] = {}
+    array_keys: list[tuple[str, int]] = []
+    for configuration in selected.values():
+        key = (configuration.config_id, configuration.beam_id)
+        if key in array_keys:
+            continue
+        array_keys.append(key)
+        beam_directory = data_root / "beam_maps" / configuration.config_id / "u0"
+        beam_candidates = tuple(
+            sorted(
+                path
+                for path in beam_directory.glob(
+                    f"beam_{configuration.beam_id:02d}_angle_*_matrix.npy"
+                )
+                if path.is_file()
+            )
+        )
+        if len(beam_candidates) != 1:
+            raise MissingSamplePathError(
+                f"expected one beam map for {key}, got {len(beam_candidates)}"
+            )
+        beam_map_paths[key] = (relative(beam_candidates[0]),)
+        radiomap_directory = data_root / "radiomaps" / (
+            f"{configuration.config_id}_beam{configuration.beam_id:02d}"
+        )
+        for scene_id in scenes:
+            candidates = tuple(
+                path
+                for path in (
+                    radiomap_directory / f"{scene_id}_labeled_radiomap.npy",
+                )
+                if path.is_file()
+            )
+            if len(candidates) != 1:
+                raise MissingSamplePathError(
+                    f"expected one radiomap for {configuration.config_id}/"
+                    f"beam{configuration.beam_id:02d}/{scene_id}, got {len(candidates)}"
+                )
+            radiomap_paths[(configuration.config_id, configuration.beam_id, scene_id)] = (
+                relative(candidates[0]),
+            )
+    return SampleInventory(
+        workspace_root=workspace_root,
+        height_paths=height_paths,
+        beam_map_paths=beam_map_paths,
+        radiomap_paths=radiomap_paths,
+        array_keys={"cross_frequency": tuple(array_keys)},
+    )
 
 
 def _split_lookup(split: SceneSplit) -> dict[str, str]:
