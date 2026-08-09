@@ -20,7 +20,7 @@ Because the test scenes are also disjoint from training and validation scenes, t
 
 - One Lite RadioFlow model shared by the 4.9 GHz training data.
 - 8x8/64TR only.
-- Beam 00 / steering angle 0 degrees only.
+- Steering angle 0 degrees only. The released 4.9 GHz configuration uses beam ID 0 for this angle; the released 6.7 GHz eight-beam configuration uses beam ID 4.
 - Existing three-channel condition: transmitter mask, normalized height, and frequency-specific beam map.
 - Existing masked flow-matching loss, EMA, classifier-free guidance, two-step Euler sampling, deterministic evaluation noise, and valid-mask metrics.
 - Frequency-grouped test metrics and saved visualizations for 6.7 GHz predictions.
@@ -48,7 +48,7 @@ The beam map and target frequency must agree. A frequency-specific beam map is t
 
 ### 3.2 Scene split
 
-Reuse the existing `scene_split_seed42.json` IDs. The train and validation manifests contain only 4.9 GHz records, while the test manifest contains only 6.7 GHz records. No scene ID may appear in more than one split. Each split contains exactly one record per selected scene because only beam 00 is retained.
+Reuse the existing `scene_split_seed42.json` IDs. The train and validation manifests contain only 4.9 GHz records, while the test manifest contains only 6.7 GHz records. No scene ID may appear in more than one split. Each split contains exactly one record per selected scene because only the 0-degree beam is retained; the manifest preserves the source beam IDs (0 at 4.9 GHz and 4 at 6.7 GHz).
 
 Expected counts:
 
