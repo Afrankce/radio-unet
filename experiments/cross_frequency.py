@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from experiments.multiconfig_manifest import (
+    ARRAY_SPECS,
     ManifestRecord,
     MissingSamplePathError,
     SampleInventory,
     SceneSplit,
+    load_manifest_jsonl,
+    load_schema_lock,
+    write_manifest_jsonl,
 )
+from experiments.provenance import sha256_file
 
 
 TRAIN_FREQUENCY_HZ = 4_900_000_000
@@ -169,7 +175,63 @@ def _select_one(
     return matches[0]
 
 
-def select_zero_degree_configurations(
+def _select_one_for_array(
+    configurations: tuple[Mapping[str, Any], ...],
+    *,
+    frequency_hz: int,
+    array_size: str,
+    steering_deg: float,
+) -> SelectedZeroDegreeConfiguration:
+    try:
+        array_spec = ARRAY_SPECS[array_size]
+    except KeyError as error:
+        raise CrossFrequencyManifestError(f"unsupported array size: {array_size}") from error
+    matches: list[SelectedZeroDegreeConfiguration] = []
+    candidates: list[str] = []
+    for configuration in configurations:
+        try:
+            config_id = str(configuration["configuration_id"])
+            actual_frequency = int(configuration["frequency_hz"])
+            rows = int(configuration["rows"])
+            cols = int(configuration["cols"])
+            tx_elements = int(configuration["tx_elements"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise CrossFrequencyManifestError(
+                "configuration lacks required identity fields"
+            ) from error
+        if actual_frequency != frequency_hz:
+            continue
+        if (rows, cols, tx_elements) != (
+            array_spec.rows,
+            array_spec.cols,
+            array_spec.tx_elements,
+        ):
+            continue
+        for beam_id, angle in _beam_entries(configuration):
+            candidates.append(f"{config_id}:beam{beam_id:02d}@{angle:.6f}")
+            if math.isclose(angle, steering_deg, abs_tol=1e-9):
+                matches.append(
+                    SelectedZeroDegreeConfiguration(
+                        frequency_hz=actual_frequency,
+                        config_id=config_id,
+                        rows=rows,
+                        cols=cols,
+                        tx_elements=tx_elements,
+                        beam_id=beam_id,
+                        steering_deg=angle,
+                    )
+                )
+    if len(matches) != 1:
+        raise CrossFrequencyManifestError(
+            "expected exactly one "
+            f"{frequency_hz} Hz {array_size}/{array_spec.tx_elements}TR "
+            f"{steering_deg:.1f}° configuration, found {len(matches)}; "
+            f"candidates={candidates}"
+        )
+    return matches[0]
+
+
+def _select_cross_frequency_configurations(
     schema: Mapping[str, Any] | Any,
     spec: CrossFrequencySpec | None = None,
 ) -> dict[int, SelectedZeroDegreeConfiguration]:
@@ -190,6 +252,27 @@ def select_zero_degree_configurations(
     return selected
 
 
+def select_zero_degree_configurations(
+    schema: Mapping[str, Any] | Any,
+    spec: CrossFrequencySpec | None = None,
+    *,
+    frequency_hz: int | None = None,
+    array_sizes: Sequence[str] | None = None,
+) -> dict[Any, SelectedZeroDegreeConfiguration]:
+    if frequency_hz is not None or array_sizes is not None:
+        if frequency_hz is None or array_sizes is None:
+            raise CrossFrequencyManifestError(
+                "same-frequency selection requires both frequency_hz and array_sizes"
+            )
+        return select_zero_degree_configurations_for_array_sizes(
+            schema,
+            frequency_hz=frequency_hz,
+            array_sizes=array_sizes,
+            steering_deg=ZERO_DEGREE,
+        )
+    return _select_cross_frequency_configurations(schema, spec)
+
+
 def inventory_cross_frequency_samples(
     workspace_root: Path,
     selected: Mapping[int, SelectedZeroDegreeConfiguration],
@@ -198,6 +281,21 @@ def inventory_cross_frequency_samples(
 ) -> SampleInventory:
     """Index only the two released configurations used by this experiment."""
 
+    return inventory_selected_configurations(
+        workspace_root,
+        selected,
+        scene_ids=scene_ids,
+        array_key="cross_frequency",
+    )
+
+
+def inventory_selected_configurations(
+    workspace_root: Path,
+    selected: Mapping[object, SelectedZeroDegreeConfiguration],
+    *,
+    scene_ids: Sequence[str] | None = None,
+    array_key: str = "selected_configurations",
+) -> SampleInventory:
     workspace_root = Path(workspace_root).resolve()
     data_root = workspace_root / "raw" / "Dataset"
     if not data_root.is_dir():
@@ -278,7 +376,7 @@ def inventory_cross_frequency_samples(
         height_paths=height_paths,
         beam_map_paths=beam_map_paths,
         radiomap_paths=radiomap_paths,
-        array_keys={"cross_frequency": tuple(array_keys)},
+        array_keys={array_key: tuple(array_keys)},
     )
 
 
@@ -438,3 +536,293 @@ def validate_cross_frequency_records(
             raise CrossFrequencyManifestError(
                 "records differ from the deterministic inventory resolution"
             )
+
+
+def select_zero_degree_configurations_for_array_sizes(
+    schema: Mapping[str, Any] | Any,
+    *,
+    frequency_hz: int,
+    array_sizes: Sequence[str],
+    steering_deg: float = ZERO_DEGREE,
+) -> dict[str, SelectedZeroDegreeConfiguration]:
+    configurations = _configurations(schema)
+    return {
+        array_size: _select_one_for_array(
+            configurations,
+            frequency_hz=frequency_hz,
+            array_size=array_size,
+            steering_deg=steering_deg,
+        )
+        for array_size in array_sizes
+    }
+
+
+def select_zero_degree_configurations_same_frequency(
+    schema: Mapping[str, Any] | Any,
+    frequency_hz: int,
+    array_sizes: Sequence[str],
+) -> dict[str, SelectedZeroDegreeConfiguration]:
+    return select_zero_degree_configurations_for_array_sizes(
+        schema,
+        frequency_hz=frequency_hz,
+        array_sizes=array_sizes,
+        steering_deg=ZERO_DEGREE,
+    )
+
+
+def _scene_sort_key(scene_id: str) -> tuple[str, int]:
+    if not scene_id.startswith("u"):
+        return (scene_id, -1)
+    suffix = scene_id[1:]
+    if suffix.isdigit():
+        return ("u", int(suffix))
+    return (scene_id, -1)
+
+
+def build_same_frequency_records(
+    *,
+    schema: Mapping[str, Any] | Any,
+    split: SceneSplit,
+    selected: Mapping[str, SelectedZeroDegreeConfiguration],
+    workspace_root: Path,
+    array_size: str,
+    frequency_hz: int = TEST_FREQUENCY_HZ,
+    steering_deg: float = ZERO_DEGREE,
+) -> tuple[ManifestRecord, ...]:
+    if array_size not in selected:
+        raise CrossFrequencyManifestError(
+            f"selected configuration missing array size {array_size}"
+        )
+    selection = selected[array_size]
+    if selection.frequency_hz != frequency_hz:
+        raise CrossFrequencyManifestError(
+            f"selected frequency mismatch for {array_size}: {selection.frequency_hz}"
+        )
+    if not math.isclose(selection.steering_deg, steering_deg, abs_tol=1e-9):
+        raise CrossFrequencyManifestError(
+            f"selected steering mismatch for {array_size}: {selection.steering_deg}"
+        )
+    inventory = inventory_selected_configurations(
+        workspace_root,
+        {array_size: selection},
+        scene_ids=(*split.train, *split.val, *split.test),
+        array_key=array_size,
+    )
+    lookup = _split_lookup(split)
+    workspace_root = Path(workspace_root).resolve()
+    records: list[ManifestRecord] = []
+    for scene_id in sorted(lookup, key=_scene_sort_key):
+        height, beam_map, radiomap = inventory.require_unique_triplet(
+            selection.config_id,
+            selection.beam_id,
+            scene_id,
+        )
+        if height.name != f"{scene_id}_height_matrix.npy":
+            raise CrossFrequencyManifestError(
+                f"height filename does not match scene {scene_id}: {height.name}"
+            )
+        if radiomap.name != f"{scene_id}_labeled_radiomap.npy":
+            raise CrossFrequencyManifestError(
+                f"radiomap filename does not match scene {scene_id}: {radiomap.name}"
+            )
+        records.append(
+            ManifestRecord(
+                sample_key=(
+                    f"{scene_id}|{array_size}|freq{frequency_hz}"
+                    f"|angle{steering_deg:.1f}|beam{selection.beam_id:02d}"
+                ),
+                split=lookup[scene_id],
+                scene_id=scene_id,
+                array_name=array_size,
+                array_rows=selection.rows,
+                array_cols=selection.cols,
+                frequency_hz=frequency_hz,
+                config_id=selection.config_id,
+                beam_id=selection.beam_id,
+                steering_deg=selection.steering_deg,
+                height_path=_relative_path(height, workspace_root),
+                beam_map_path=_relative_path(beam_map, workspace_root),
+                radiomap_path=_relative_path(radiomap, workspace_root),
+            )
+        )
+    return tuple(records)
+
+
+def validate_same_frequency_records(
+    records: Sequence[ManifestRecord],
+    *,
+    split: SceneSplit,
+    selected: Mapping[str, SelectedZeroDegreeConfiguration],
+    array_size: str,
+    frequency_hz: int = TEST_FREQUENCY_HZ,
+    steering_deg: float = ZERO_DEGREE,
+    schema: Mapping[str, Any] | Any | None = None,
+    workspace_root: Path | None = None,
+) -> None:
+    values = tuple(records)
+    expected_counts = {"train": 560, "val": 80, "test": 160}
+    if len(values) != sum(expected_counts.values()):
+        raise CrossFrequencyManifestError(
+            f"expected 800 records, got {len(values)}"
+        )
+    if len({record.sample_key for record in values}) != len(values):
+        raise CrossFrequencyManifestError("sample keys are not unique")
+    if len({record.scene_id for record in values}) != len(values):
+        raise CrossFrequencyManifestError("scene IDs are not unique")
+    if len({record.radiomap_path for record in values}) != len(values):
+        raise CrossFrequencyManifestError("radiomap paths are not unique")
+    lookup = _split_lookup(split)
+    split_counts = {
+        name: sum(record.split == name for record in values)
+        for name in ("train", "val", "test")
+    }
+    if split_counts != expected_counts:
+        raise CrossFrequencyManifestError(
+            f"split counts mismatch: {split_counts}, expected {expected_counts}"
+        )
+    selection = selected.get(array_size)
+    if selection is None:
+        raise CrossFrequencyManifestError(
+            f"selected configuration missing array size {array_size}"
+        )
+    for record in values:
+        if not isinstance(record, ManifestRecord):
+            raise CrossFrequencyManifestError("all records must be ManifestRecord values")
+        if lookup.get(record.scene_id) != record.split:
+            raise CrossFrequencyManifestError(
+                f"record split mismatch for {record.scene_id}: {record.split}"
+            )
+        if record.array_name != array_size:
+            raise CrossFrequencyManifestError(
+                f"record array size mismatch: {record.array_name}"
+            )
+        if record.frequency_hz != frequency_hz:
+            raise CrossFrequencyManifestError(
+                f"record frequency mismatch for {record.scene_id}"
+            )
+        if record.config_id != selection.config_id or record.beam_id != selection.beam_id:
+            raise CrossFrequencyManifestError(
+                f"record selection mismatch for {record.scene_id}"
+            )
+        if (record.array_rows, record.array_cols) != (selection.rows, selection.cols):
+            raise CrossFrequencyManifestError(
+                f"record array geometry mismatch for {record.scene_id}"
+            )
+        if not math.isclose(record.steering_deg, steering_deg, abs_tol=1e-9):
+            raise CrossFrequencyManifestError(
+                f"record steering angle is not {steering_deg}"
+            )
+        if Path(record.height_path).name != f"{record.scene_id}_height_matrix.npy":
+            raise CrossFrequencyManifestError(
+                f"height path mismatch for {record.scene_id}"
+            )
+        if Path(record.radiomap_path).name != f"{record.scene_id}_labeled_radiomap.npy":
+            raise CrossFrequencyManifestError(
+                f"radiomap path mismatch for {record.scene_id}"
+            )
+    if schema is not None and workspace_root is not None:
+        expected = build_same_frequency_records(
+            schema=schema,
+            split=split,
+            selected=selected,
+            workspace_root=workspace_root,
+            array_size=array_size,
+            frequency_hz=frequency_hz,
+            steering_deg=steering_deg,
+        )
+        if values != expected:
+            raise CrossFrequencyManifestError(
+                "records differ from the deterministic inventory resolution"
+            )
+
+
+def build_same_frequency_manifest_artifact(
+    *,
+    dataset_root: Path,
+    split_path: Path,
+    array_size: str,
+    frequency_hz: int = TEST_FREQUENCY_HZ,
+    steering_deg: float = ZERO_DEGREE,
+    output_path: Path | None = None,
+    schema_path: Path | None = None,
+) -> dict[str, Any]:
+    dataset_root = Path(dataset_root).resolve()
+    split_path = Path(split_path).resolve()
+    repo_root = Path(__file__).resolve().parents[1]
+    resolved_schema = (
+        Path(schema_path).resolve()
+        if schema_path is not None
+        else repo_root / "experiments" / "multiconfig_schema.json"
+    )
+    output = (
+        Path(output_path).resolve()
+        if output_path is not None
+        else split_path.parent / f"manifest_samefreq_{frequency_hz / 1_000_000_000:.1f}ghz_{array_size}_{steering_deg:.0f}deg.jsonl"
+    )
+    schema = load_schema_lock(resolved_schema)
+    try:
+        payload = __import__("json").loads(split_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise RuntimeError(f"cannot read fixed scene split {split_path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("fixed scene split must be a JSON object")
+    split = SceneSplit.from_dict(payload)
+    selected = select_zero_degree_configurations_same_frequency(
+        schema,
+        frequency_hz,
+        (array_size,),
+    )
+    records = build_same_frequency_records(
+        schema=schema,
+        split=split,
+        selected=selected,
+        workspace_root=dataset_root,
+        array_size=array_size,
+        frequency_hz=frequency_hz,
+        steering_deg=steering_deg,
+    )
+    validate_same_frequency_records(
+        records,
+        split=split,
+        selected=selected,
+        array_size=array_size,
+        frequency_hz=frequency_hz,
+        steering_deg=steering_deg,
+        schema=schema,
+        workspace_root=dataset_root,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_manifest_jsonl(output, records)
+    written = load_manifest_jsonl(output)
+    validate_same_frequency_records(
+        written,
+        split=split,
+        selected=selected,
+        array_size=array_size,
+        frequency_hz=frequency_hz,
+        steering_deg=steering_deg,
+        schema=schema,
+        workspace_root=dataset_root,
+    )
+    return {
+        "schema_version": 1,
+        "manifest": str(output),
+        "manifest_sha256": sha256_file(output),
+        "scene_split": str(split_path),
+        "scene_split_sha256": sha256_file(split_path),
+        "dataset_revision": schema.identities.get("dataset_revision"),
+        "records": len(written),
+        "split_counts": {
+            name: sum(record.split == name for record in written)
+            for name in ("train", "val", "test")
+        },
+        "selected": {
+            array_size: {
+                "config_id": selected[array_size].config_id,
+                "beam_id": selected[array_size].beam_id,
+                "steering_deg": selected[array_size].steering_deg,
+                "frequency_hz": selected[array_size].frequency_hz,
+            }
+        },
+        "schema_path": str(resolved_schema),
+    }
