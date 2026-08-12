@@ -41,44 +41,124 @@ class CheckpointIdentity:
     model_size: str
     condition_channels: int
     parameter_count: int
-    manifest_sha256: str
-    split_sha256: str
-    schema_sha256: str
     config_sha256: str
-    archive_sha256: str
-    dataset_revision: str
-    radioflow_upstream_base: str
-    git_commit: str
-    seed: int
+    manifest_sha256: str | None = None
+    split_sha256: str | None = None
+    schema_sha256: str | None = None
+    archive_sha256: str | None = None
+    dataset_revision: str | None = None
+    radioflow_upstream_base: str | None = None
+    git_commit: str | None = None
+    seed: int | None = None
+    experiment: str | None = None
+    variant: str | None = None
+    mask_protocol_sha256: str | None = None
+
+    LEGACY_KEYS = (
+        "array_size",
+        "model_size",
+        "condition_channels",
+        "parameter_count",
+        "manifest_sha256",
+        "split_sha256",
+        "schema_sha256",
+        "config_sha256",
+        "archive_sha256",
+        "dataset_revision",
+        "radioflow_upstream_base",
+        "git_commit",
+        "seed",
+    )
+    SPARSE_KEYS = (
+        "experiment",
+        "array_size",
+        "variant",
+        "model_size",
+        "condition_channels",
+        "parameter_count",
+        "config_sha256",
+        "mask_protocol_sha256",
+    )
+
+    def _mode(self) -> str:
+        has_sparse = any(
+            getattr(self, field) is not None
+            for field in ("experiment", "variant", "mask_protocol_sha256")
+        )
+        has_legacy = any(
+            getattr(self, field) is not None
+            for field in (
+                "manifest_sha256",
+                "split_sha256",
+                "schema_sha256",
+                "archive_sha256",
+                "dataset_revision",
+                "radioflow_upstream_base",
+                "git_commit",
+                "seed",
+            )
+        )
+        if has_sparse and has_legacy:
+            raise CheckpointIdentityError(
+                "run identity schema mismatch: cannot mix legacy and sparse fields"
+            )
+        if has_sparse:
+            return "sparse"
+        if has_legacy:
+            return "legacy"
+        raise CheckpointIdentityError(
+            "run identity schema mismatch: identity is missing legacy and sparse fields"
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        mode = self._mode()
+        keys = self.LEGACY_KEYS if mode == "legacy" else self.SPARSE_KEYS
+        return {key: getattr(self, key) for key in keys}
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "CheckpointIdentity":
-        expected = set(cls.__dataclass_fields__)
-        if set(payload) != expected:
+        payload_keys = set(payload)
+        legacy_keys = set(cls.LEGACY_KEYS)
+        sparse_keys = set(cls.SPARSE_KEYS)
+        if payload_keys == legacy_keys:
+            schema = "legacy"
+        elif payload_keys == sparse_keys:
+            schema = "sparse"
+        else:
             raise CheckpointIdentityError(
-                "run identity keys mismatch: "
-                f"missing={sorted(expected - set(payload))}, "
-                f"extra={sorted(set(payload) - expected)}"
+                "run identity schema mismatch: "
+                f"legacy_missing={sorted(legacy_keys - payload_keys)}, "
+                f"legacy_extra={sorted(payload_keys - legacy_keys)}, "
+                f"sparse_missing={sorted(sparse_keys - payload_keys)}, "
+                f"sparse_extra={sorted(payload_keys - sparse_keys)}"
             )
         try:
-            identity = cls(
+            common = dict(
                 array_size=str(payload["array_size"]),
                 model_size=str(payload["model_size"]),
                 condition_channels=int(payload["condition_channels"]),
                 parameter_count=int(payload["parameter_count"]),
-                manifest_sha256=str(payload["manifest_sha256"]),
-                split_sha256=str(payload["split_sha256"]),
-                schema_sha256=str(payload["schema_sha256"]),
                 config_sha256=str(payload["config_sha256"]),
-                archive_sha256=str(payload["archive_sha256"]),
-                dataset_revision=str(payload["dataset_revision"]),
-                radioflow_upstream_base=str(payload["radioflow_upstream_base"]),
-                git_commit=str(payload["git_commit"]),
-                seed=int(payload["seed"]),
             )
+            if schema == "legacy":
+                identity = cls(
+                    **common,
+                    manifest_sha256=str(payload["manifest_sha256"]),
+                    split_sha256=str(payload["split_sha256"]),
+                    schema_sha256=str(payload["schema_sha256"]),
+                    archive_sha256=str(payload["archive_sha256"]),
+                    dataset_revision=str(payload["dataset_revision"]),
+                    radioflow_upstream_base=str(payload["radioflow_upstream_base"]),
+                    git_commit=str(payload["git_commit"]),
+                    seed=int(payload["seed"]),
+                )
+            else:
+                identity = cls(
+                    **common,
+                    experiment=str(payload["experiment"]),
+                    variant=str(payload["variant"]),
+                    mask_protocol_sha256=str(payload["mask_protocol_sha256"]),
+                )
         except (KeyError, TypeError, ValueError) as error:
             raise CheckpointIdentityError(f"invalid run identity: {error}") from error
         identity.validate()
@@ -87,26 +167,53 @@ class CheckpointIdentity:
     def validate(self) -> None:
         if not self.array_size or not self.model_size:
             raise CheckpointIdentityError("array_size and model_size must be non-empty")
-        if self.condition_channels != 3:
-            raise CheckpointIdentityError("condition_channels must equal 3")
         if self.parameter_count <= 0:
             raise CheckpointIdentityError("parameter_count must be positive")
-        for field in (
-            "manifest_sha256",
-            "split_sha256",
-            "schema_sha256",
-            "config_sha256",
-            "archive_sha256",
+        mode = self._mode()
+        if len(self.config_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.config_sha256
         ):
-            value = getattr(self, field)
-            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
-                raise CheckpointIdentityError(f"{field} must be a lowercase SHA-256")
-        for field in ("dataset_revision", "radioflow_upstream_base", "git_commit"):
-            value = getattr(self, field)
-            if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
-                raise CheckpointIdentityError(f"{field} must be a lowercase Git commit")
-        if self.seed != 42:
-            raise CheckpointIdentityError("seed must equal 42")
+            raise CheckpointIdentityError("config_sha256 must be a lowercase SHA-256")
+        if mode == "legacy":
+            if self.condition_channels != 3:
+                raise CheckpointIdentityError("condition_channels must equal 3")
+            for field in (
+                "manifest_sha256",
+                "split_sha256",
+                "schema_sha256",
+                "archive_sha256",
+            ):
+                value = getattr(self, field)
+                if not isinstance(value, str) or len(value) != 64 or any(
+                    character not in "0123456789abcdef" for character in value
+                ):
+                    raise CheckpointIdentityError(f"{field} must be a lowercase SHA-256")
+            for field in ("dataset_revision", "radioflow_upstream_base", "git_commit"):
+                value = getattr(self, field)
+                if not isinstance(value, str) or len(value) != 40 or any(
+                    character not in "0123456789abcdef" for character in value
+                ):
+                    raise CheckpointIdentityError(f"{field} must be a lowercase Git commit")
+            if self.seed != 42:
+                raise CheckpointIdentityError("seed must equal 42")
+            return
+        if not self.experiment or not self.variant:
+            raise CheckpointIdentityError(
+                "experiment and variant must be non-empty for sparse checkpoints"
+            )
+        if self.variant not in {"no_beam_masked", "beam_masked"}:
+            raise CheckpointIdentityError(
+                "variant must be one of {'no_beam_masked', 'beam_masked'}"
+            )
+        if self.condition_channels not in {4, 5}:
+            raise CheckpointIdentityError("condition_channels must equal 4 or 5")
+        value = self.mask_protocol_sha256
+        if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise CheckpointIdentityError(
+                "mask_protocol_sha256 must be a lowercase SHA-256"
+            )
 
 
 @dataclass(frozen=True)
@@ -352,6 +459,12 @@ def _validate_identity(
         raise CheckpointIdentityError("run_identity must be an object")
     actual = CheckpointIdentity.from_dict(payload)
     expected.validate()
+    actual_mode = actual._mode()
+    expected_mode = expected._mode()
+    if actual_mode != expected_mode:
+        raise CheckpointIdentityError(
+            f"run identity schema mismatch: expected {expected_mode}, got {actual_mode}"
+        )
     actual_parameters = sum(parameter.numel() for parameter in model.parameters())
     if actual_parameters != expected.parameter_count:
         raise CheckpointIdentityError(
