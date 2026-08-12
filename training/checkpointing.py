@@ -41,10 +41,10 @@ class CheckpointIdentity:
     model_size: str
     condition_channels: int
     parameter_count: int
-    config_sha256: str
     manifest_sha256: str | None = None
     split_sha256: str | None = None
     schema_sha256: str | None = None
+    config_sha256: str | None = None
     archive_sha256: str | None = None
     dataset_revision: str | None = None
     radioflow_upstream_base: str | None = None
@@ -170,8 +170,9 @@ class CheckpointIdentity:
         if self.parameter_count <= 0:
             raise CheckpointIdentityError("parameter_count must be positive")
         mode = self._mode()
-        if len(self.config_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in self.config_sha256
+        value = self.config_sha256
+        if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
         ):
             raise CheckpointIdentityError("config_sha256 must be a lowercase SHA-256")
         if mode == "legacy":

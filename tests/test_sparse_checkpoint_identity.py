@@ -175,6 +175,43 @@ def test_legacy_identity_keys_remain_unchanged() -> None:
     assert set(identity.to_dict()) == LEGACY_IDENTITY_KEYS
 
 
+def test_legacy_identity_preserves_historical_positional_argument_order() -> None:
+    module = _checkpoint_module()
+    model = torch.nn.Linear(2, 1)
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    identity = module.CheckpointIdentity(
+        "8x8",
+        "lite",
+        3,
+        parameter_count,
+        "1" * 64,
+        "2" * 64,
+        "3" * 64,
+        "4" * 64,
+        "5" * 64,
+        "6" * 40,
+        "7" * 40,
+        "8" * 40,
+        42,
+    )
+
+    assert identity.array_size == "8x8"
+    assert identity.model_size == "lite"
+    assert identity.condition_channels == 3
+    assert identity.parameter_count == parameter_count
+    assert identity.manifest_sha256 == "1" * 64
+    assert identity.split_sha256 == "2" * 64
+    assert identity.schema_sha256 == "3" * 64
+    assert identity.config_sha256 == "4" * 64
+    assert identity.archive_sha256 == "5" * 64
+    assert identity.dataset_revision == "6" * 40
+    assert identity.radioflow_upstream_base == "7" * 40
+    assert identity.git_commit == "8" * 40
+    assert identity.seed == 42
+    identity.validate()
+    assert tuple(identity.to_dict()) == module.CheckpointIdentity.LEGACY_KEYS
+
+
 def test_sparse_identity_uses_distinct_key_schema() -> None:
     identity = _sparse_identity(torch.nn.Linear(2, 1))
 
