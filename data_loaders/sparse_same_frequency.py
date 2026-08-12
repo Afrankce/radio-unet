@@ -305,8 +305,26 @@ class SparseSameFrequencyRadiomapDataset(Dataset):
         }
 
 
+def sparse_collate(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if not samples:
+        raise SameFrequencyDatasetError("cannot collate an empty sparse sample list")
+    tensor_keys = (
+        "condition",
+        "target",
+        "valid_mask",
+        "observation_mask",
+        "missing_mask",
+        "observed_map",
+        "masked_map",
+    )
+    return {
+        **{key: torch.stack([sample[key] for sample in samples]) for key in tensor_keys},
+        "metadata": [sample["metadata"] for sample in samples],
+    }
+
+
 __all__ = [
     "SameFrequencyDatasetError",
     "SparseSameFrequencyRadiomapDataset",
-    "multiconfig_collate",
+    "sparse_collate",
 ]

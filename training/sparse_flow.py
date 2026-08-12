@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -29,11 +30,8 @@ def build_masked_flow_pair(
     observation_mask: Tensor,
     valid_mask: Tensor,
     *,
-    time: float,
-) -> tuple[Tensor, Tensor]:
-    if not isinstance(time, float) or not math.isfinite(time) or not 0.0 <= time <= 1.0:
-        raise ValueError("time must be finite and satisfy 0 <= time <= 1")
-
+    time: float | Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
     _validate_tensor_shape("initial_noise", initial_noise)
     _validate_tensor_shape("target", target)
     _validate_tensor_shape("observed_map", observed_map)
@@ -66,14 +64,50 @@ def build_masked_flow_pair(
     ):
         if not bool(torch.isfinite(value).all()):
             raise ValueError(f"{value_name} must be finite")
+    time_tensor = _time_tensor(time, reference=target)
     if not bool((observation_mask & ~valid_mask).sum().item() == 0):
         raise ValueError("observation_mask must be a subset of valid_mask")
+    if not bool(torch.count_nonzero(observed_map.masked_select(~observation_mask)).item() == 0):
+        raise ValueError("observed_map must be zero outside observation_mask")
 
     missing_valid = valid_mask & ~observation_mask
     if int(missing_valid.sum().item()) == 0:
         raise ValueError("missing valid region must be non-empty")
 
     missing_float = missing_valid.to(dtype=target.dtype)
-    xt = observed_map + missing_float * ((1.0 - time) * initial_noise + time * target)
+    xt = observed_map + missing_float * (
+        (1.0 - time_tensor) * initial_noise + time_tensor * target
+    )
     ut = missing_float * (target - initial_noise)
-    return xt, ut
+    xt = xt.masked_fill(~valid_mask, 0.0)
+    ut = ut.masked_fill(~missing_valid, 0.0)
+    return xt, ut, missing_valid
+
+
+def _time_tensor(time: float | Tensor, *, reference: Tensor) -> Tensor:
+    if isinstance(time, Tensor):
+        if time.device != reference.device:
+            raise ValueError("time must be on the same device as target")
+        if not time.is_floating_point():
+            raise ValueError("time must be floating point")
+        if not bool(torch.isfinite(time).all()):
+            raise ValueError("time must be finite and satisfy 0 <= time <= 1")
+        if bool(((time < 0.0) | (time > 1.0)).any()):
+            raise ValueError("time must be finite and satisfy 0 <= time <= 1")
+        if time.ndim == 0:
+            return time.to(dtype=reference.dtype).reshape(
+                *((1,) * reference.ndim)
+            )
+        if reference.ndim != 4 or time.ndim != 1 or time.shape[0] != reference.shape[0]:
+            raise ValueError("time tensor must have shape [B] for batched inputs")
+        return time.to(dtype=reference.dtype).reshape(reference.shape[0], 1, 1, 1)
+    if isinstance(time, bool) or not isinstance(time, float):
+        raise ValueError("time must be a float or floating tensor")
+    if not math.isfinite(time) or not 0.0 <= time <= 1.0:
+        raise ValueError("time must be finite and satisfy 0 <= time <= 1")
+    return torch.tensor(time, device=reference.device, dtype=reference.dtype).reshape(
+        *((1,) * reference.ndim)
+    )
+
+
+__all__ = ["build_masked_flow_pair"]

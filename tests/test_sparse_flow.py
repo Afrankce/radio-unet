@@ -18,7 +18,7 @@ def test_build_masked_flow_pair_respects_t_zero_and_one() -> None:
     observation_mask = torch.tensor([[[True, False], [False, False]]])
     observed_map = torch.tensor([[[5.0, 0.0], [0.0, 0.0]]])
 
-    x0, velocity0 = module.build_masked_flow_pair(
+    x0, velocity0, loss_mask0 = module.build_masked_flow_pair(
         initial_noise,
         target,
         observed_map,
@@ -26,7 +26,7 @@ def test_build_masked_flow_pair_respects_t_zero_and_one() -> None:
         valid_mask,
         time=0.0,
     )
-    x1, velocity1 = module.build_masked_flow_pair(
+    x1, velocity1, loss_mask1 = module.build_masked_flow_pair(
         initial_noise,
         target,
         observed_map,
@@ -39,6 +39,8 @@ def test_build_masked_flow_pair_respects_t_zero_and_one() -> None:
     assert torch.equal(x1, torch.tensor([[[5.0, 7.0], [0.0, 13.0]]]))
     assert torch.equal(velocity0, torch.tensor([[[0.0, 5.0], [0.0, 9.0]]]))
     assert torch.equal(velocity1, torch.tensor([[[0.0, 5.0], [0.0, 9.0]]]))
+    assert torch.equal(loss_mask0, valid_mask & ~observation_mask)
+    assert torch.equal(loss_mask1, valid_mask & ~observation_mask)
 
 
 def test_build_masked_flow_pair_uses_ut_only_on_missing_valid_region() -> None:
@@ -49,7 +51,7 @@ def test_build_masked_flow_pair_uses_ut_only_on_missing_valid_region() -> None:
     observation_mask = torch.tensor([[[True, False], [False, False]]])
     observed_map = torch.tensor([[[1.0, 0.0], [0.0, 0.0]]])
 
-    xt, ut = module.build_masked_flow_pair(
+    xt, ut, missing_mask = module.build_masked_flow_pair(
         initial_noise,
         target,
         observed_map,
@@ -60,6 +62,31 @@ def test_build_masked_flow_pair_uses_ut_only_on_missing_valid_region() -> None:
 
     assert torch.equal(xt, torch.tensor([[[1.0, 11.0], [25.0, 0.0]]]))
     assert torch.equal(ut, torch.tensor([[[0.0, 4.0], [20.0, 0.0]]]))
+    assert not bool((missing_mask & observation_mask).any())
+    assert not bool((missing_mask & ~valid_mask).any())
+
+
+def test_build_masked_flow_pair_accepts_batched_time_tensor() -> None:
+    module = _module()
+    initial_noise = torch.zeros(2, 1, 2, 2)
+    target = torch.ones(2, 1, 2, 2)
+    valid_mask = torch.ones(2, 1, 2, 2, dtype=torch.bool)
+    observation_mask = torch.zeros(2, 1, 2, 2, dtype=torch.bool)
+    observed_map = torch.zeros_like(target)
+
+    xt, ut, missing_mask = module.build_masked_flow_pair(
+        initial_noise=initial_noise,
+        target=target,
+        observed_map=observed_map,
+        observation_mask=observation_mask,
+        valid_mask=valid_mask,
+        time=torch.tensor([0.25, 0.75]),
+    )
+
+    assert torch.allclose(xt[0], torch.full((1, 2, 2), 0.25))
+    assert torch.allclose(xt[1], torch.full((1, 2, 2), 0.75))
+    assert torch.equal(ut, torch.ones_like(target))
+    assert torch.equal(missing_mask, valid_mask)
 
 
 @pytest.mark.parametrize("bad_time", [-0.1, 1.1, float("nan")])

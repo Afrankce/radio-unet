@@ -70,6 +70,14 @@ class SparseSameFrequencyTrainConfig:
     train_mask_mode: str = "epoch_deterministic"
     max_epochs: int = MAX_EPOCHS
     early_stopping_patience: int = EARLY_STOPPING_PATIENCE
+    seed: int = 42
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-5
+    warmup_ratio: float = 0.10
+    ema_decay: float = 0.999
+    num_workers: int = 2
+    use_amp: bool = True
+    amp_dtype: str = "float16"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_root", Path(self.dataset_root))
@@ -103,10 +111,24 @@ class SparseSameFrequencyTrainConfig:
             "condition_noise_seed": 4242,
             "max_epochs": MAX_EPOCHS,
             "early_stopping_patience": EARLY_STOPPING_PATIENCE,
+            "seed": 42,
+            "num_workers": 2,
         }
         for name, expected in locked_ints.items():
             actual = getattr(self, name)
             if type(actual) is not int or actual != expected:
+                raise SparseConfigError(f"{name} is locked to {expected!r}")
+        locked_scalars: dict[str, Any] = {
+            "learning_rate": 1e-3,
+            "weight_decay": 1e-5,
+            "warmup_ratio": 0.10,
+            "ema_decay": 0.999,
+            "use_amp": True,
+            "amp_dtype": "float16",
+        }
+        for name, expected in locked_scalars.items():
+            actual = getattr(self, name)
+            if actual != expected or type(actual) is not type(expected):
                 raise SparseConfigError(f"{name} is locked to {expected!r}")
 
     @property
@@ -116,6 +138,58 @@ class SparseSameFrequencyTrainConfig:
     @property
     def formal_run_variant(self) -> str:
         return FORMAL_RUN_VARIANT
+
+    @property
+    def train_samples(self) -> int:
+        return SCENE_COUNTS["train"]
+
+    @property
+    def val_samples(self) -> int:
+        return SCENE_COUNTS["val"]
+
+    @property
+    def test_samples(self) -> int:
+        return SCENE_COUNTS["test"]
+
+    @property
+    def micro_batch_size(self) -> int:
+        return 2
+
+    @property
+    def accumulation_steps(self) -> int:
+        return 28
+
+    @property
+    def effective_batch_size(self) -> int:
+        return self.micro_batch_size * self.accumulation_steps
+
+    @property
+    def optimizer_steps_per_epoch(self) -> int:
+        return math.ceil(
+            math.ceil(self.train_samples / self.micro_batch_size)
+            / self.accumulation_steps
+        )
+
+    @property
+    def planned_optimizer_steps(self) -> int:
+        return self.optimizer_steps_per_epoch * self.max_epochs
+
+    @property
+    def warmup_steps(self) -> int:
+        return int(self.planned_optimizer_steps * self.warmup_ratio)
+
+    @property
+    def run_dir(self) -> Path:
+        return self.run_root / self.array_size
+
+    def precision_runtime(self, device: Any) -> dict[str, Any]:
+        enabled = self.use_amp and getattr(device, "type", None) == "cuda"
+        return {
+            "amp_requested": self.use_amp,
+            "amp_dtype": self.amp_dtype,
+            "autocast_enabled": enabled,
+            "scaler_enabled": enabled,
+        }
 
     def canonical_payload(self) -> dict[str, Any]:
         return {
@@ -137,6 +211,20 @@ class SparseSameFrequencyTrainConfig:
             "max_epochs": self.max_epochs,
             "early_stopping_patience": self.early_stopping_patience,
             "split_id": FIXED_SPLIT_ID,
+            "seed": self.seed,
+            "learning_rate": self.learning_rate,
+            "weight_decay": self.weight_decay,
+            "warmup_ratio": self.warmup_ratio,
+            "ema_decay": self.ema_decay,
+            "num_workers": self.num_workers,
+            "use_amp": self.use_amp,
+            "amp_dtype": self.amp_dtype,
+            "micro_batch_size": self.micro_batch_size,
+            "accumulation_steps": self.accumulation_steps,
+            "effective_batch_size": self.effective_batch_size,
+            "optimizer_steps_per_epoch": self.optimizer_steps_per_epoch,
+            "planned_optimizer_steps": self.planned_optimizer_steps,
+            "warmup_steps": self.warmup_steps,
         }
 
     @property
