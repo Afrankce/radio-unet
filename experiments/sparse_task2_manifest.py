@@ -29,6 +29,9 @@ MANDATORY_SINGLEBEAM_STEERING_DEG = 0.0
 MANDATORY_SINGLEBEAM_SAMPLE_COUNT = 819
 MANDATORY_SINGLEBEAM_SCENE_COUNTS = {"train": 560, "val": 80, "test": 160}
 MANDATORY_SINGLEBEAM_ARRAY_SIZES = ("8x8", "16x16", "32x32")
+MANDATORY_SINGLEBEAM_SCENE_SPLIT_SHA256 = (
+    "a62ffd48065b3ff39560fd18a93455bf7eec9b6f6397edc98555f46cbdfa9e27"
+)
 _MANDATORY_RECORD_COUNT = sum(MANDATORY_SINGLEBEAM_SCENE_COUNTS.values())
 
 _SCENE_SPLIT_NAME = "scene_split_seed42.json"
@@ -51,7 +54,12 @@ def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
 
 
 def _scene_split_from_path(path: Path) -> SceneSplit:
-    return SceneSplit.from_dict(_read_json_object(path, label="scene split"))
+    split = SceneSplit.from_dict(_read_json_object(path, label="scene split"))
+    if split.seed != 42:
+        raise SingleBeamTask2ManifestError(
+            f"single-beam protocol requires scene split seed 42, got {split.seed}"
+        )
+    return split
 
 
 def _scene_split_path_expected(manifest_path: Path) -> Path:
@@ -125,6 +133,14 @@ def build_singlebeam_task2_manifest(
         raise SingleBeamTask2ManifestError(f"unsupported array size: {array_size}")
     if not split_path.is_file():
         raise SingleBeamTask2ManifestError(f"scene split is missing: {split_path}")
+    if split_path.name != _SCENE_SPLIT_NAME:
+        raise SingleBeamTask2ManifestError(
+            f"single-beam protocol requires {_SCENE_SPLIT_NAME}, got {split_path.name}"
+        )
+    if sha256_file(split_path) != MANDATORY_SINGLEBEAM_SCENE_SPLIT_SHA256:
+        raise SingleBeamTask2ManifestError(
+            "scene split does not match the locked existing scene_split_seed42.json"
+        )
 
     schema = load_schema_lock(_SCHEMA_PATH)
     split = _scene_split_from_path(split_path)
@@ -196,6 +212,14 @@ def validate_singlebeam_task2_manifest(
     split_path = Path(split_path).resolve()
     if array_size not in MANDATORY_SINGLEBEAM_ARRAY_SIZES:
         raise SingleBeamTask2ManifestError(f"unsupported array size: {array_size}")
+    if split_path.name != _SCENE_SPLIT_NAME:
+        raise SingleBeamTask2ManifestError(
+            f"single-beam protocol requires {_SCENE_SPLIT_NAME}, got {split_path.name}"
+        )
+    if sha256_file(split_path) != MANDATORY_SINGLEBEAM_SCENE_SPLIT_SHA256:
+        raise SingleBeamTask2ManifestError(
+            "scene split does not match the locked existing scene_split_seed42.json"
+        )
     sidecar_path = _sidecar_path(manifest_path)
     if not sidecar_path.is_file():
         raise SingleBeamTask2ManifestError(
