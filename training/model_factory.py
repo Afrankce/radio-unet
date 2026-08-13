@@ -19,6 +19,9 @@ EXPECTED_PARAMETER_COUNTS = {
 SPARSE_PARAMETER_COUNTS = {
     ("lite", 5): 3_996_011,
 }
+TASK2_SPARSE_PARAMETER_COUNTS = {
+    ("lite", "feature5_mask"): 3_996_011,
+}
 
 
 class FrameworkLockError(RuntimeError):
@@ -101,6 +104,51 @@ def build_sparse_radioflow(
     if actual != expected:
         raise FrameworkLockError(
             f"sparse parameter count changed: expected {expected}, got {actual}"
+        )
+    return network
+
+
+def build_task2_sparse_radioflow(
+    *,
+    condition_variant: Literal["feature5_mask"] = "feature5_mask",
+    model_size: Literal["lite"] = "lite",
+) -> DiffUNet:
+    """Build the locked five-channel model for the single-beam Task 2 run."""
+
+    if condition_variant != "feature5_mask":
+        raise FrameworkLockError(
+            "Task 2 sparse factory is locked to condition_variant='feature5_mask'"
+        )
+    if model_size != "lite":
+        raise FrameworkLockError("Task 2 sparse factory is locked to model_size='lite'")
+    if tuple(MODEL_FEATURES.get("lite", ())) != EXPECTED_FEATURES["lite"]:
+        raise FrameworkLockError(
+            f"RadioFlow feature tuple changed for lite: {MODEL_FEATURES.get('lite')!r}"
+        )
+    network = DiffUNet(
+        con_channels=5,
+        model_size="lite",
+        activation_checkpointing=False,
+    )
+    if type(network.embed_model) is not BasicUNetEncoder:
+        raise FrameworkLockError("unexpected condition encoder")
+    if type(network.model) is not BasicUNetDe:
+        raise FrameworkLockError("unexpected velocity decoder")
+    if network.embed_model.conv_0.conv_0.conv.in_channels != 5:
+        raise FrameworkLockError("Task 2 condition encoder must consume 5 channels")
+    if network.cfg_drop_prob != 0.25:
+        raise FrameworkLockError("RadioFlow CFG dropout must remain 0.25")
+    if network.activation_checkpointing is not False:
+        raise FrameworkLockError("Task 2 Lite model must not enable activation checkpointing")
+    if network.embed_model.activation_checkpointing is not False:
+        raise FrameworkLockError("Task 2 Lite encoder must not enable activation checkpointing")
+    if network.model.activation_checkpointing is not False:
+        raise FrameworkLockError("Task 2 Lite decoder must not enable activation checkpointing")
+    actual = sum(parameter.numel() for parameter in network.parameters())
+    expected = TASK2_SPARSE_PARAMETER_COUNTS[("lite", "feature5_mask")]
+    if actual != expected:
+        raise FrameworkLockError(
+            f"Task 2 sparse parameter count changed: expected {expected}, got {actual}"
         )
     return network
 

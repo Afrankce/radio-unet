@@ -53,6 +53,11 @@ class CheckpointIdentity:
     experiment: str | None = None
     variant: str | None = None
     mask_protocol_sha256: str | None = None
+    protocol: str | None = None
+    observation_count: int | None = None
+    split_type: str | None = None
+    task2_manifest_sha256: str | None = None
+    task2_split_sha256: str | None = None
 
     LEGACY_KEYS = (
         "array_size",
@@ -79,12 +84,48 @@ class CheckpointIdentity:
         "config_sha256",
         "mask_protocol_sha256",
     )
+    TASK2_KEYS = (
+        "protocol",
+        "array_size",
+        "variant",
+        "model_size",
+        "condition_channels",
+        "parameter_count",
+        "config_sha256",
+        "manifest_sha256",
+        "split_sha256",
+        "mask_protocol_sha256",
+        "observation_count",
+        "split_type",
+    )
 
     def _mode(self) -> str:
+        has_task2 = self.protocol is not None
         has_sparse = any(
             getattr(self, field) is not None
             for field in ("experiment", "variant", "mask_protocol_sha256")
         )
+        has_legacy_only = any(
+            getattr(self, field) is not None
+            for field in (
+                "schema_sha256",
+                "archive_sha256",
+                "dataset_revision",
+                "radioflow_upstream_base",
+                "git_commit",
+                "seed",
+            )
+        )
+        if has_task2 and (has_legacy_only or self.experiment is not None):
+            raise CheckpointIdentityError(
+                "run identity schema mismatch: cannot mix Task 2, sparse, and legacy fields"
+            )
+        if has_task2:
+            if self.experiment is not None:
+                raise CheckpointIdentityError(
+                    "run identity schema mismatch: Task 2 cannot include experiment"
+                )
+            return "task2"
         has_legacy = any(
             getattr(self, field) is not None
             for field in (
@@ -102,6 +143,8 @@ class CheckpointIdentity:
             raise CheckpointIdentityError(
                 "run identity schema mismatch: cannot mix legacy and sparse fields"
             )
+        if has_task2:
+            return "task2"
         if has_sparse:
             return "sparse"
         if has_legacy:
@@ -112,7 +155,13 @@ class CheckpointIdentity:
 
     def to_dict(self) -> dict[str, Any]:
         mode = self._mode()
-        keys = self.LEGACY_KEYS if mode == "legacy" else self.SPARSE_KEYS
+        keys = (
+            self.LEGACY_KEYS
+            if mode == "legacy"
+            else self.SPARSE_KEYS
+            if mode == "sparse"
+            else self.TASK2_KEYS
+        )
         return {key: getattr(self, key) for key in keys}
 
     @classmethod
@@ -120,10 +169,13 @@ class CheckpointIdentity:
         payload_keys = set(payload)
         legacy_keys = set(cls.LEGACY_KEYS)
         sparse_keys = set(cls.SPARSE_KEYS)
+        task2_keys = set(cls.TASK2_KEYS)
         if payload_keys == legacy_keys:
             schema = "legacy"
         elif payload_keys == sparse_keys:
             schema = "sparse"
+        elif payload_keys == task2_keys:
+            schema = "task2"
         else:
             raise CheckpointIdentityError(
                 "run identity schema mismatch: "
@@ -152,12 +204,23 @@ class CheckpointIdentity:
                     git_commit=str(payload["git_commit"]),
                     seed=int(payload["seed"]),
                 )
-            else:
+            elif schema == "sparse":
                 identity = cls(
                     **common,
                     experiment=str(payload["experiment"]),
                     variant=str(payload["variant"]),
                     mask_protocol_sha256=str(payload["mask_protocol_sha256"]),
+                )
+            else:
+                identity = cls(
+                    **common,
+                    protocol=str(payload["protocol"]),
+                    variant=str(payload["variant"]),
+                    manifest_sha256=str(payload["manifest_sha256"]),
+                    split_sha256=str(payload["split_sha256"]),
+                    mask_protocol_sha256=str(payload["mask_protocol_sha256"]),
+                    observation_count=int(payload["observation_count"]),
+                    split_type=str(payload["split_type"]),
                 )
         except (KeyError, TypeError, ValueError) as error:
             raise CheckpointIdentityError(f"invalid run identity: {error}") from error
@@ -197,6 +260,32 @@ class CheckpointIdentity:
                     raise CheckpointIdentityError(f"{field} must be a lowercase Git commit")
             if self.seed != 42:
                 raise CheckpointIdentityError("seed must equal 42")
+            return
+        if mode == "task2":
+            if self.protocol != "singlebeam_feature5_samples819":
+                raise CheckpointIdentityError(
+                    "Task 2 protocol must equal 'singlebeam_feature5_samples819'"
+                )
+            if self.variant != "feature5_mask":
+                raise CheckpointIdentityError("Task 2 variant must equal 'feature5_mask'")
+            if self.condition_channels != 5:
+                raise CheckpointIdentityError("Task 2 condition_channels must equal 5")
+            if self.observation_count != 819:
+                raise CheckpointIdentityError("Task 2 observation_count must equal 819")
+            if self.split_type != "scene_disjoint_single_beam":
+                raise CheckpointIdentityError(
+                    "Task 2 split_type must equal 'scene_disjoint_single_beam'"
+                )
+            for field in (
+                "manifest_sha256",
+                "split_sha256",
+                "mask_protocol_sha256",
+            ):
+                value = getattr(self, field)
+                if not isinstance(value, str) or len(value) != 64 or any(
+                    character not in "0123456789abcdef" for character in value
+                ):
+                    raise CheckpointIdentityError(f"{field} must be a lowercase SHA-256")
             return
         if not self.experiment or not self.variant:
             raise CheckpointIdentityError(
@@ -297,15 +386,21 @@ class TrainerState:
             raise CheckpointError(
                 "next_epoch_index must equal completed_epochs at an epoch boundary"
             )
-        if len(self.history) != self.completed_epochs:
+        if len(self.history) > self.completed_epochs:
             raise CheckpointError("history length must equal completed_epochs")
         if not math.isfinite(self.best_val_db_rmse) or self.best_val_db_rmse < 0.0:
             raise CheckpointError("best_val_db_rmse must be finite and non-negative")
+        previous_epoch = 0
         for index, row in enumerate(self.history, start=1):
             if not row:
                 raise CheckpointError(f"history row {index} is empty")
-            if "epoch" in row and row["epoch"] != index:
-                raise CheckpointError("history epoch sequence is not contiguous")
+            if "epoch" in row:
+                epoch = int(row["epoch"])
+                if epoch <= previous_epoch:
+                    raise CheckpointError(
+                        "history epoch sequence must be strictly increasing"
+                    )
+                previous_epoch = epoch
 
 
 def _raise_history_row():
@@ -646,9 +741,12 @@ def rebuild_metrics_csv(
     if not columns or any(tuple(row) != columns for row in rows):
         raise CheckpointError("history rows do not share one fixed column order")
     if "epoch" in columns:
-        epochs = [row["epoch"] for row in rows]
-        if epochs != list(range(1, len(rows) + 1)):
-            raise CheckpointError("history contains duplicate or non-contiguous epochs")
+        epochs = [int(row["epoch"]) for row in rows]
+        for previous, current in zip(epochs, epochs[1:]):
+            if current <= previous:
+                raise CheckpointError(
+                    "history contains duplicate or out-of-order epochs"
+                )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
