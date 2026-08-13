@@ -7,6 +7,7 @@ import pytest
 
 from experiments.cross_frequency import select_zero_degree_configurations_same_frequency
 from experiments.multiconfig_manifest import (
+    ExistingSchemaMismatchError,
     ManifestRecord,
     SceneSplit,
     canonical_json_bytes,
@@ -27,6 +28,11 @@ from experiments.sparse_task2_manifest import (
 )
 
 
+_LOCKED_SPLIT_SOURCE = Path(
+    r"E:\datasets\MultiConfigRadiomap\manifests\scene_split_seed42.json"
+)
+
+
 def _schema_path() -> Path:
     return Path(__file__).resolve().parents[1] / "experiments" / "multiconfig_schema.json"
 
@@ -42,8 +48,10 @@ def _split_payload() -> dict[str, object]:
 
 
 def _write_split(path: Path) -> SceneSplit:
-    path.write_bytes(canonical_json_bytes(_split_payload()))
-    return SceneSplit.from_dict(_split_payload())
+    if not _LOCKED_SPLIT_SOURCE.is_file():
+        pytest.skip(f"locked scene split source is missing: {_LOCKED_SPLIT_SOURCE}")
+    path.write_bytes(_LOCKED_SPLIT_SOURCE.read_bytes())
+    return SceneSplit.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
 def _materialize_dataset(root: Path, split: SceneSplit) -> None:
@@ -204,4 +212,21 @@ def test_validate_rejects_changed_split_bytes_even_if_scene_lists_are_identical(
             manifest_path=manifest_path,
             split_path=split_path,
             array_size="8x8",
+        )
+
+
+def test_build_rejects_different_preexisting_manifest_bytes(
+    manifest_fixture: dict[str, object],
+) -> None:
+    split_path = manifest_fixture["split_path"]
+    manifest_path = manifest_fixture["root"] / "8x8.jsonl"
+    original = manifest_path.read_bytes()
+    manifest_path.write_bytes(original + b"\ncorruption")
+
+    with pytest.raises(ExistingSchemaMismatchError, match="different bytes"):
+        build_singlebeam_task2_manifest(
+            dataset_root=manifest_fixture["root"],
+            split_path=split_path,
+            array_size="8x8",
+            output_path=manifest_path,
         )
