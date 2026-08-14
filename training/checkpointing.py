@@ -291,12 +291,27 @@ class CheckpointIdentity:
             raise CheckpointIdentityError(
                 "experiment and variant must be non-empty for sparse checkpoints"
             )
-        if self.variant not in {"no_beam_masked", "beam_masked"}:
-            raise CheckpointIdentityError(
-                "variant must be one of {'no_beam_masked', 'beam_masked'}"
-            )
-        if self.condition_channels not in {4, 5}:
-            raise CheckpointIdentityError("condition_channels must equal 4 or 5")
+        if self.experiment == "sparse_consistent_abcd_v1":
+            if self.variant not in {
+                "environment_only",
+                "concat_fullfm",
+                "multiscale_fullfm",
+                "multiscale_consistent",
+            }:
+                raise CheckpointIdentityError(
+                    "sparse-consistent variant is not one of the registered A/B/C/D arms"
+                )
+            if self.condition_channels not in {3, 5}:
+                raise CheckpointIdentityError(
+                    "sparse-consistent condition_channels must equal 3 or 5"
+                )
+        else:
+            if self.variant not in {"no_beam_masked", "beam_masked"}:
+                raise CheckpointIdentityError(
+                    "variant must be one of {'no_beam_masked', 'beam_masked'}"
+                )
+            if self.condition_channels not in {4, 5}:
+                raise CheckpointIdentityError("condition_channels must equal 4 or 5")
         value = self.mask_protocol_sha256
         if not isinstance(value, str) or len(value) != 64 or any(
             character not in "0123456789abcdef" for character in value
