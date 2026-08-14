@@ -1,6 +1,6 @@
 # Pre-registration: Measurement-Consistent Sparse Radiomap Reconstruction
 
-**Frozen at commit:** to be stamped by `prereg.sh freeze`
+**Frozen at commit:** 1ce564d048722ba5946c5925eccad6d21b2ffa93
 **Question doc:** `docs/science-superpowers/questions/2026-08-14-sparse-consistent-reconstruction.md`
 **Analysis plan:** `docs/science-superpowers/plans/2026-08-14-sparse-consistent-reconstruction.md`
 
