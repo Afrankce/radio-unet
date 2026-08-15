@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", required=True)
     parser.add_argument("--case-index", type=int)
+    parser.add_argument(
+        "--exploratory-long-b",
+        action="store_true",
+        help="Evaluate the separate 600-epoch exploratory 8x8 B run",
+    )
     return parser
 
 
@@ -61,6 +66,10 @@ def evaluate(arguments: argparse.Namespace) -> dict[str, Any]:
         run_root=arguments.run_root,
         array_size=arguments.array_size,
         arm=arguments.arm,
+        max_epochs=600 if arguments.exploratory_long_b else 120,
+        early_stopping_patience=600 if arguments.exploratory_long_b else 20,
+        min_optimizer_steps=6000 if arguments.exploratory_long_b else 1000,
+        exploratory=arguments.exploratory_long_b,
     )
     device = resolve_device(arguments.device)
     context = preflight_sparse_consistent(cfg)

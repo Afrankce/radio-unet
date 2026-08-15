@@ -59,6 +59,7 @@ class SparseConsistentTrainConfig:
     amp_dtype: str = "float16"
     euler_steps: int = 2
     cfg_scale: float = 1.0
+    exploratory: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_root", Path(self.dataset_root))
@@ -71,14 +72,30 @@ class SparseConsistentTrainConfig:
             raise SparseConsistentConfigError(f"unsupported A/B/C/D arm: {self.arm}")
         if self.model_size != "lite":
             raise SparseConsistentConfigError("the registered pilot is Lite only")
-        locked_ints = {
-            "max_epochs": 120,
-            "early_stopping_patience": 20,
-            "min_optimizer_steps": 1000,
-            "seed": 42,
-            "num_workers": 2,
-            "euler_steps": 2,
-        }
+        if type(self.exploratory) is not bool:
+            raise SparseConsistentConfigError("exploratory must be boolean")
+        if self.exploratory:
+            if self.arm != "concat_fullfm":
+                raise SparseConsistentConfigError(
+                    "the long exploratory run is locked to B/concat_fullfm"
+                )
+            locked_ints = {
+                "max_epochs": 600,
+                "early_stopping_patience": 600,
+                "min_optimizer_steps": 6000,
+                "seed": 42,
+                "num_workers": 2,
+                "euler_steps": 2,
+            }
+        else:
+            locked_ints = {
+                "max_epochs": 120,
+                "early_stopping_patience": 20,
+                "min_optimizer_steps": 1000,
+                "seed": 42,
+                "num_workers": 2,
+                "euler_steps": 2,
+            }
         for name, expected in locked_ints.items():
             actual = getattr(self, name)
             if type(actual) is not int or actual != expected:
@@ -162,7 +179,7 @@ class SparseConsistentTrainConfig:
         }
 
     def canonical_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": 1,
             "protocol": SPARSE_CONSISTENT_PROTOCOL,
             "array_size": self.array_size,
@@ -196,6 +213,12 @@ class SparseConsistentTrainConfig:
             "euler_steps": self.euler_steps,
             "cfg_scale": self.cfg_scale,
         }
+        # Keep the registered protocol hash byte-for-byte compatible with the
+        # already completed A/B/C/D runs.  The exploratory flag is only part of
+        # the identity for the separate long B run.
+        if self.exploratory:
+            payload["exploratory"] = True
+        return payload
 
     @property
     def config_sha256(self) -> str:
