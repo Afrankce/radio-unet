@@ -50,6 +50,7 @@ def choose_valid_observation_mask(
     scene_id: str,
     seed: int = 42,
     count: int = SINGLEBEAM_TASK2_SAMPLE_COUNT,
+    protocol: str = SINGLEBEAM_TASK2_PROTOCOL,
 ) -> Tensor:
     """Select exactly ``count`` unique valid final-grid pixels deterministically."""
 
@@ -77,7 +78,7 @@ def choose_valid_observation_mask(
             f"observation count {count} exceeds valid pixel count {int(valid_indices.numel())}"
         )
     generator = torch.Generator(device="cpu").manual_seed(
-        _hash_seed(SINGLEBEAM_TASK2_PROTOCOL, seed, scene_id, count)
+        _hash_seed(protocol, seed, scene_id, count)
     )
     order = torch.randperm(valid_indices.numel(), generator=generator)
     selected = valid_indices[order[:count]]
@@ -117,6 +118,9 @@ class SparseTask2RadiomapDataset(Dataset):
         output_size: tuple[int, int] = OUTPUT_SIZE,
         mask_seed: int = 42,
         sample_count: int = SINGLEBEAM_TASK2_SAMPLE_COUNT,
+        beam_angles: Sequence[float] | None = None,
+        condition_variant: Literal["feature5_mask", "feature4"] = "feature5_mask",
+        protocol: str = SINGLEBEAM_TASK2_PROTOCOL,
     ) -> None:
         if split not in ("train", "val", "test"):
             raise SparseTask2DatasetError(f"invalid split: {split!r}")
@@ -128,6 +132,21 @@ class SparseTask2RadiomapDataset(Dataset):
             )
         if not math.isfinite(float(height_max)) or float(height_max) <= 0.0:
             raise SparseTask2DatasetError("height_max must be finite and positive")
+        if condition_variant not in ("feature5_mask", "feature4"):
+            raise SparseTask2DatasetError(
+                f"unsupported condition variant: {condition_variant!r}"
+            )
+        if not isinstance(protocol, str) or not protocol:
+            raise SparseTask2DatasetError("protocol must be a non-empty string")
+        angle_set: tuple[float, ...] | None = None
+        if beam_angles is not None:
+            angles = tuple(float(value) for value in beam_angles)
+            if len(set(angles)) != len(angles) or any(not math.isfinite(a) for a in angles):
+                raise SparseTask2DatasetError("beam_angles must be unique finite values")
+            angle_set = angles
+        self.beam_angles = angle_set
+        self.condition_variant = condition_variant
+        self.protocol = protocol
         if type(mask_seed) is not int or mask_seed != 42:
             raise SparseTask2DatasetError("mask_seed is locked to 42")
         if type(sample_count) is not int or sample_count != SINGLEBEAM_TASK2_SAMPLE_COUNT:
@@ -169,22 +188,52 @@ class SparseTask2RadiomapDataset(Dataset):
         if not records:
             raise SparseTask2DatasetError(f"manifest has no {split} samples")
 
+        allowed_beam_ids: set[int] | None = None
         expected_beam_id = _zero_degree_beam_id(array_size)
+        if angle_set is not None:
+            matches = [
+                beam.beam_id
+                for beam in ARRAY_SPECS[array_size].beams
+                if any(
+                    math.isclose(angle, beam.steering_deg, abs_tol=1e-9)
+                    for angle in angle_set
+                )
+            ]
+            if len(matches) != len(angle_set):
+                raise SparseTask2DatasetError(
+                    "beam_angles must map one-to-one to configured array beams"
+                )
+            allowed_beam_ids = set(matches)
         sample_keys = [record.sample_key for record in records]
         logical_keys = [(record.scene_id, record.beam_id) for record in records]
         if len(sample_keys) != len(set(sample_keys)) or len(logical_keys) != len(set(logical_keys)):
             raise SparseTask2DatasetError("selected split contains duplicate samples")
         beam_ids = {record.beam_id for record in records}
         config_ids = {record.config_id for record in records}
-        if beam_ids != {expected_beam_id} or len(config_ids) != 1:
+        if len(config_ids) != 1:
             raise SparseTask2DatasetError(
-                f"sparse Task 2 split must contain one zero-degree beam {expected_beam_id}"
+                "sparse Task 2 split must contain exactly one configuration"
+            )
+        if allowed_beam_ids is None:
+            if beam_ids != {expected_beam_id}:
+                raise SparseTask2DatasetError(
+                    f"sparse Task 2 split must contain one zero-degree beam {expected_beam_id}"
+                )
+        elif not beam_ids.issubset(allowed_beam_ids):
+            raise SparseTask2DatasetError(
+                f"sparse Task 2 split contains beams outside {sorted(allowed_beam_ids)}"
             )
         for record in records:
-            self._validate_record(record, expected_beam_id)
+            self._validate_record(record, expected_beam_id, allowed_beam_ids, angle_set)
         self.records = records
 
-    def _validate_record(self, record: ManifestRecord, expected_beam_id: int) -> None:
+    def _validate_record(
+        self,
+        record: ManifestRecord,
+        expected_beam_id: int,
+        allowed_beam_ids: set[int] | None,
+        angle_set: tuple[float, ...] | None,
+    ) -> None:
         spec = ARRAY_SPECS[self.array_size]
         if record.array_name != self.array_size or (
             record.array_rows,
@@ -197,16 +246,29 @@ class SparseTask2RadiomapDataset(Dataset):
             raise SparseTask2DatasetError(
                 f"record {record.sample_key} frequency is not 6.7 GHz"
             )
-        if not math.isclose(
-            record.steering_deg, SINGLEBEAM_TASK2_STEERING_DEG, abs_tol=1e-9
-        ):
-            raise SparseTask2DatasetError(
-                f"record {record.sample_key} steering angle is not 0 degrees"
-            )
-        if record.beam_id != expected_beam_id:
-            raise SparseTask2DatasetError(
-                f"record {record.sample_key} beam ID mismatch: expected {expected_beam_id}"
-            )
+        if angle_set is None:
+            if not math.isclose(
+                record.steering_deg, SINGLEBEAM_TASK2_STEERING_DEG, abs_tol=1e-9
+            ):
+                raise SparseTask2DatasetError(
+                    f"record {record.sample_key} steering angle is not 0 degrees"
+                )
+            if record.beam_id != expected_beam_id:
+                raise SparseTask2DatasetError(
+                    f"record {record.sample_key} beam ID mismatch: expected {expected_beam_id}"
+                )
+        else:
+            if not any(
+                math.isclose(record.steering_deg, angle, abs_tol=1e-9)
+                for angle in angle_set
+            ):
+                raise SparseTask2DatasetError(
+                    f"record {record.sample_key} steering angle {record.steering_deg} is outside the allowed set"
+                )
+            if allowed_beam_ids is not None and record.beam_id not in allowed_beam_ids:
+                raise SparseTask2DatasetError(
+                    f"record {record.sample_key} beam ID {record.beam_id} is not allowed"
+                )
         for relative_path in (
             record.height_path,
             record.beam_map_path,
@@ -281,30 +343,42 @@ class SparseTask2RadiomapDataset(Dataset):
             scene_id=record.scene_id,
             seed=self.mask_seed,
             count=self.sample_count,
+            protocol=self.protocol,
         )
         sparse_map = (target * observation_mask.to(dtype=target.dtype)).masked_fill(
             ~valid_mask, 0.0
         )
         observation_channel = observation_mask.to(dtype=torch.float32)
-        condition = torch.cat(
-            (sparse_map, observation_channel, self.tx_mask, height, beam), dim=0
-        ).contiguous()
-        if condition.shape[0] != SINGLEBEAM_TASK2_CONDITION_CHANNELS:
+        if self.condition_variant == "feature5_mask":
+            condition = torch.cat(
+                (sparse_map, observation_channel, self.tx_mask, height, beam), dim=0
+            ).contiguous()
+        else:
+            condition = torch.cat(
+                (sparse_map, self.tx_mask, height, beam), dim=0
+            ).contiguous()
+        expected_channels = (
+            SINGLEBEAM_TASK2_CONDITION_CHANNELS
+            if self.condition_variant == "feature5_mask"
+            else SINGLEBEAM_TASK2_CONDITION_CHANNELS - 1
+        )
+        if condition.shape[0] != expected_channels:
             raise SparseTask2DatasetError(
-                f"condition must have {SINGLEBEAM_TASK2_CONDITION_CHANNELS} channels"
+                f"condition must have {expected_channels} channels for {self.condition_variant}"
             )
         valid_pixels = int(valid_mask.sum().item())
         observed_pixels = int(observation_mask.sum().item())
         metadata = {
             **record.to_dict(),
-            "protocol": SINGLEBEAM_TASK2_PROTOCOL,
+            "protocol": self.protocol,
             "split": self.split,
             "array_size": self.array_size,
             "tx_rc": [self.tx_rc[0], self.tx_rc[1]],
             "mask_seed": self.mask_seed,
-            "mask_key": f"{SINGLEBEAM_TASK2_PROTOCOL}|seed{self.mask_seed}|scene{record.scene_id}",
+            "mask_key": f"{self.protocol}|seed{self.mask_seed}|scene{record.scene_id}",
             "observed_pixels": observed_pixels,
             "valid_pixels": valid_pixels,
+            "condition_variant": self.condition_variant,
         }
         if observed_pixels != self.sample_count:
             raise SparseTask2DatasetError(
