@@ -8,6 +8,8 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from evaluation.radiomap_metrics import complete_window_mask, _ssim_map
+
 
 class SparseTask2MetricError(ValueError):
     """Task 2 metric inputs or aggregation state are invalid."""
@@ -20,12 +22,9 @@ class _RegionAccumulator:
     sum_sq: float = 0.0
     sum_abs: float = 0.0
     sum_target_sq: float = 0.0
-    sum_prediction: float = 0.0
-    sum_target: float = 0.0
-    sum_prediction_sq: float = 0.0
-    sum_target_sq: float = 0.0
-    sum_product: float = 0.0
     max_abs: float = 0.0
+    _ssim_sum: float = 0.0
+    _n_ssim_windows: int = 0
     _sample_metrics: list[dict[str, float]] = field(default_factory=list)
 
     def update(self, prediction: Tensor, target: Tensor, mask: Tensor) -> None:
@@ -50,12 +49,23 @@ class _RegionAccumulator:
             self.sum_sq += sq
             self.sum_abs += absolute
             self.sum_target_sq += target_sq
-            self.sum_prediction += float(pred.sum().item())
-            self.sum_target += float(truth.sum().item())
-            self.sum_prediction_sq += float(pred.square().sum().item())
-            self.sum_target_sq += target_sq
-            self.sum_product += float((pred * truth).sum().item())
             self.max_abs = max(self.max_abs, float(error.abs().max().item()))
+            region_mask = mask[index:index + 1]
+            prediction_ssim = torch.where(
+                region_mask,
+                prediction[index:index + 1],
+                torch.zeros_like(prediction[index:index + 1]),
+            ).double()
+            target_ssim = torch.where(
+                region_mask,
+                target[index:index + 1],
+                torch.zeros_like(target[index:index + 1]),
+            ).double()
+            complete = complete_window_mask(region_mask)
+            if bool(complete.any()):
+                ssim_map = _ssim_map(prediction_ssim, target_ssim)
+                self._ssim_sum += float(ssim_map[complete].sum().item())
+                self._n_ssim_windows += int(complete.sum().item())
             self._sample_metrics.append({
                 "db_rmse": math.sqrt(90_000.0 * sq / count),
                 "db_mae": 300.0 * absolute / count,
@@ -90,7 +100,11 @@ class _RegionAccumulator:
                 "mse": mse,
                 "nmse": self.sum_sq / max(self.sum_target_sq, 1e-12),
                 "psnr": math.inf if mse == 0.0 else 10.0 * math.log10(1.0 / mse),
-                "ssim": self._global_ssim(),
+                "ssim": (
+                    self._ssim_sum / self._n_ssim_windows
+                    if self._n_ssim_windows > 0
+                    else None
+                ),
                 "sample_macro_db_rmse": sum(item["db_rmse"] for item in self._sample_metrics) / sample_count,
                 "sample_macro_db_mae": sum(item["db_mae"] for item in self._sample_metrics) / sample_count,
                 "sample_macro_psnr": sum(item["psnr"] for item in self._sample_metrics) / sample_count,
@@ -101,22 +115,6 @@ class _RegionAccumulator:
                 self.sum_abs / self.pixel_count if self.pixel_count else 0.0
             )
         return result
-
-    def _global_ssim(self) -> float:
-        n = float(self.pixel_count)
-        mean_prediction = self.sum_prediction / n
-        mean_target = self.sum_target / n
-        var_prediction = max(self.sum_prediction_sq / n - mean_prediction**2, 0.0)
-        var_target = max(self.sum_target_sq / n - mean_target**2, 0.0)
-        covariance = self.sum_product / n - mean_prediction * mean_target
-        c1 = 0.01**2
-        c2 = 0.03**2
-        denominator = (mean_prediction**2 + mean_target**2 + c1) * (
-            var_prediction + var_target + c2
-        )
-        if denominator == 0.0:
-            return 1.0
-        return ((2.0 * mean_prediction * mean_target + c1) * (2.0 * covariance + c2)) / denominator
 
 
 class SparseTask2MetricAccumulator:
