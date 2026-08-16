@@ -66,21 +66,33 @@ condition = [sparse_map, observation_mask, tx_mask, normalized_height, beam_map]
 
 ## 4. 模型变体
 
+### 观测一致性语义（V0/V1 共用原则）
+
+`sparse_map` 中的有效观测是无噪声真值，属于硬约束，不是待预测目标：训练与推理全程
+观测点固定为其真值，模型速度场在观测点为 0，损失只覆盖缺失区。最终输出在观测点
+必须逐比特等于 `sparse_map`，缺失区由 flow/回归在观测值作为边界条件下补全。当前
+代码里 `build_masked_flow_pair`（multiscale_consistent 所用）已经实现该语义：
+`xt = observed_map + missing * ((1-t)*noise + t*target)`、`ut = missing*(target-noise)`、
+`loss_mask = valid & ~obs`；v3 把它作为 V1 的核心，而不是再依赖输出后 copy-back。
+
 ### V0 确定性回归（对齐官方 RadioUNet 范式）
 
 - RadioFlow Lite UNet，condition 4/5 通道，直接回归 normalized dB 图。
-- 损失：全部 valid 像素掩码 MSE（与官方一致）；对比消融加 L1。
-- 推理：`output = where(obs_mask, sparse_map, output)` 硬回写，保证观测一致性。
+- 损失：缺失区掩码 MSE，观测像素单独加权（×100）使网络自身复现观测值；对比官方
+  全 valid MSE 消融。
+- 推理：`output = where(obs_mask, sparse_map, output)` 硬回写，保证观测区逐像素等于
+  `sparse_map`（回归范式下回写是必要保底，但训练加权让它不是唯一手段）。
 - 这是 v3 的主变体：先证明协议正确、拿到可与论文比较的确定性基线。
 
 ### V1 条件 FM + 观测一致性（保留 RadioFlow 风格）
 
 - 沿用条件 FM，但修复信息通路：
-  1. 每个 Euler 步之后 `x = where(obs_mask, sparse_map, x)` 硬投影；
-  2. velocity 损失中观测像素权重 ×100（819 点当前只占 1.3% 的损失质量）；
+  1. 训练用 pinned-observation flow：`xt` 的观测点固定为 `sparse_map`，`ut` 观测点为 0，
+     `loss_mask = valid & ~obs`（复用 `build_masked_flow_pair` 语义，训练/推理一致）；
+  2. 每个 Euler 步之后 `x = where(obs_mask, sparse_map, x)` 硬投影，输出端不再额外回写；
   3. sparse_map/mask 经独立分支在原始分辨率注入（多尺度 skip 注入，gate 非零初始化）；
   4. 2-step Euler 与 10-step Euler 对比。
-- 输出同样做观测回写。目标是回答：FM 范式在同等协议下能否不输给 V0。
+- 目标是回答：FM 范式在同等协议下能否不输给 V0。
 
 ### V2 可选对抗版（对齐 RME-GAN）
 
