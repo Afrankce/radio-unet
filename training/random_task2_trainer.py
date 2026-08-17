@@ -14,6 +14,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from data_loaders.cross_frequency import load_cross_frequency_height_max
 from data_loaders.random_task2 import RandomTask2RadiomapDataset, random_task2_collate
+from evaluation.random_task2_sampling import random_task2_euler_cfg_sample
+from evaluation.sparse_task2_sampling import make_task2_sample_noise
 from evaluation.sparse_task2_metrics import (
     SparseTask2MetricAccumulator,
     sparse_task2_metrics_for_json,
@@ -33,13 +35,20 @@ from training.random_task2_config import (
     RandomTask2ConfigError,
     RandomTask2TrainConfig,
 )
+from training.random_task2_flow import build_random_task2_pinned_flow_pair
+from training.random_task2_model import build_random_task2_pinned_model
+from training.sparse_task2_flow import masked_task2_velocity_mse
 
 
 class RandomTask2TrainerError(RuntimeError):
     """The random-instance sparse Task 2 training contract is invalid."""
 
 
-class _ModelWrapper(torch.nn.Module):
+_PINNED_FM_CFG_SCALE = 1.0
+_PINNED_FM_EULER_STEPS = 2
+
+
+class _RegressionModelWrapper(torch.nn.Module):
     """Deterministic regression wrapper around the Lite DiffUNet."""
 
     def __init__(self, condition_channels: int) -> None:
@@ -63,8 +72,10 @@ class _ModelWrapper(torch.nn.Module):
         )
 
 
-def build_random_task2_model(cfg: RandomTask2TrainConfig) -> _ModelWrapper:
-    return _ModelWrapper(cfg.condition_channels)
+def build_random_task2_model(cfg: RandomTask2TrainConfig) -> torch.nn.Module:
+    if cfg.mode == "regression":
+        return _RegressionModelWrapper(cfg.condition_channels)
+    return build_random_task2_pinned_model(condition_variant=cfg.variant)
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -183,6 +194,8 @@ class RandomTask2Trainer:
             (sample["observation_mask"] & ~sample["valid_mask"]).sum().item() == 0
         ):
             raise RandomTask2TrainerError("observation mask is not a subset of valid mask")
+        if bool((sample["sparse_map"].masked_select(~sample["observation_mask"])).abs().max().item() > 1e-6):
+            raise RandomTask2TrainerError("sparse_map must be zero outside observations")
         _write_json(self.cfg.run_dir / "config.json", self._payload())
         return {
             "status": "preflight_complete",
@@ -218,6 +231,8 @@ class RandomTask2Trainer:
 
     @torch.inference_mode()
     def _predict(self, batch: Mapping[str, Any], *, use_ema: bool = True) -> Tensor:
+        if self.cfg.mode != "regression":
+            raise RandomTask2TrainerError("_predict is only valid for regression mode")
         condition = batch["condition"].to(self.device, non_blocking=True)
         model = self.ema.ema_model if use_ema else self.model
         with torch.amp.autocast(
@@ -228,29 +243,92 @@ class RandomTask2Trainer:
             prediction = model(condition)
         return prediction.float().clamp(0.0, 1.0)
 
+    @torch.inference_mode()
+    def _sample_pinned_prediction(self, batch: Mapping[str, Any], *, use_ema: bool = True) -> Tensor:
+        if self.cfg.mode != "pinned_fm":
+            raise RandomTask2TrainerError("_sample_pinned_prediction is only valid for pinned_fm")
+        condition = batch["condition"].to(self.device, non_blocking=True)
+        observation_mask = batch["observation_mask"].to(self.device, non_blocking=True)
+        sparse_map = batch["sparse_map"].to(self.device, non_blocking=True)
+        model = self.ema.ema_model if use_ema else self.model
+        noises = [
+            make_task2_sample_noise(
+                protocol=RANDOM_TASK2_PROTOCOL,
+                array_size=self.cfg.array_size,
+                split="val",
+                sample_key=str(metadata["sample_key"]),
+                shape=tuple(batch["target"].shape[1:]),
+                base_seed=self.cfg.seed,
+                dtype=batch["target"].dtype,
+            )
+            for metadata in batch["metadata"]
+        ]
+        x0 = torch.stack(noises).to(self.device, dtype=batch["target"].dtype)
+        return random_task2_euler_cfg_sample(
+            model,
+            condition=condition,
+            x0=x0,
+            sparse_map=sparse_map,
+            observation_mask=observation_mask,
+            cfg_scale=_PINNED_FM_CFG_SCALE,
+            steps=_PINNED_FM_EULER_STEPS,
+            use_amp=self.cfg.use_amp,
+        )
+
     def _run_batch(self, batch: Mapping[str, Any]) -> tuple[Tensor, float]:
         condition = batch["condition"].to(self.device, non_blocking=True)
         target = batch["target"].to(self.device, non_blocking=True)
         valid_mask = batch["valid_mask"].to(self.device, non_blocking=True)
         observation_mask = batch["observation_mask"].to(self.device, non_blocking=True)
+        if self.cfg.mode == "regression":
+            with torch.amp.autocast(
+                device_type=self.device.type,
+                dtype=torch.float16,
+                enabled=self.device.type == "cuda" and self.cfg.use_amp,
+            ):
+                prediction = self.model(condition)
+            prediction = prediction.float()
+            weight = torch.ones_like(prediction)
+            observed = valid_mask & observation_mask
+            missing = valid_mask & ~observation_mask
+            weight = torch.where(missing, weight, torch.zeros_like(weight))
+            weight = torch.where(
+                observed,
+                torch.full_like(weight, self.cfg.observed_loss_weight),
+                weight,
+            )
+            error = (prediction - target).square() * weight
+            loss = error.sum() / weight.sum().clamp_min(1.0)
+            return loss, float(loss.detach().item())
+        sparse_map = batch["sparse_map"].to(self.device, non_blocking=True)
         with torch.amp.autocast(
             device_type=self.device.type,
             dtype=torch.float16,
             enabled=self.device.type == "cuda" and self.cfg.use_amp,
         ):
-            prediction = self.model(condition)
-        prediction = prediction.float()
-        weight = torch.ones_like(prediction)
-        observed = valid_mask & observation_mask
-        missing = valid_mask & ~observation_mask
-        weight = torch.where(missing, weight, torch.zeros_like(weight))
-        weight = torch.where(
-            observed,
-            torch.full_like(weight, self.cfg.observed_loss_weight),
-            weight,
+            x0 = torch.randn_like(target)
+            time_step = torch.rand(target.shape[0], device=target.device, dtype=target.dtype)
+            xt, ut, loss_mask = build_random_task2_pinned_flow_pair(
+                x0=x0,
+                target=target,
+                sparse_map=sparse_map,
+                observation_mask=observation_mask,
+                valid_mask=valid_mask,
+                time=time_step,
+            )
+            embedding = self.model.embed_model(condition, sparse_map, observation_mask)
+            prediction = self.model(
+                image=condition,
+                x=xt,
+                pred_type="denoise",
+                step=time_step,
+                embedding=embedding,
+            )
+        loss = masked_task2_velocity_mse(
+            prediction.float(),
+            ut.float(),
+            loss_mask,
         )
-        error = (prediction - target).square() * weight
-        loss = error.sum() / weight.sum().clamp_min(1.0)
         return loss, float(loss.detach().item())
 
     def _train_epoch(self, *, max_optimizer_steps: int | None = None) -> float:
@@ -299,8 +377,11 @@ class RandomTask2Trainer:
             sparse_map = batch["sparse_map"].to(self.device, non_blocking=True)
             valid_mask = batch["valid_mask"].to(self.device, non_blocking=True)
             target = batch["target"].to(self.device, non_blocking=True)
-            prediction = self._predict(batch, use_ema=True)
-            prediction = torch.where(observation_mask, sparse_map, prediction)
+            if self.cfg.mode == "regression":
+                prediction = self._predict(batch, use_ema=True)
+                prediction = torch.where(observation_mask, sparse_map, prediction)
+            else:
+                prediction = self._sample_pinned_prediction(batch, use_ema=True)
             accumulator.update(
                 prediction,
                 target,
@@ -473,7 +554,7 @@ def run_random_task2_training(
 __all__ = [
     "RandomTask2Trainer",
     "RandomTask2TrainerError",
-    "_ModelWrapper",
+    "_RegressionModelWrapper",
     "build_random_task2_model",
     "run_random_task2_training",
 ]

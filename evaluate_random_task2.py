@@ -12,6 +12,8 @@ import torch
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 from data_loaders.random_task2 import random_task2_collate
+from evaluation.random_task2_sampling import random_task2_euler_cfg_sample
+from evaluation.sparse_task2_sampling import make_task2_sample_noise
 from evaluation.sparse_task2_metrics import (
     SparseTask2MetricAccumulator,
     sparse_task2_metrics_for_json,
@@ -22,6 +24,10 @@ from training.random_task2_trainer import (
     RandomTask2TrainerError,
     build_random_task2_model,
 )
+
+
+_PINNED_FM_CFG_SCALE = 1.0
+_PINNED_FM_EULER_STEPS = 2
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -42,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--array-size", choices=("8x8", "16x16", "32x32"), required=True)
     parser.add_argument("--variant", choices=("feature4", "feature5_mask"), default="feature4")
+    parser.add_argument("--mode", choices=("regression", "pinned_fm"), default="regression")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", required=True)
     return parser
@@ -56,7 +63,7 @@ def evaluate(arguments: argparse.Namespace) -> dict[str, Any]:
         run_root=arguments.run_root,
         array_size=arguments.array_size,
         variant=arguments.variant,
-        mode="regression",
+        mode=arguments.mode,
     )
     device = resolve_device(arguments.device)
     checkpoint = Path(arguments.checkpoint) if arguments.checkpoint else cfg.run_dir / "best.pt"
@@ -106,9 +113,35 @@ def evaluate(arguments: argparse.Namespace) -> dict[str, Any]:
             dtype=torch.float16,
             enabled=device.type == "cuda" and cfg.use_amp,
         ):
-            prediction = model(condition)
-        prediction = prediction.float().clamp(0.0, 1.0)
-        prediction = torch.where(observation_mask, sparse_map, prediction)
+            if cfg.mode == "regression":
+                prediction = model(condition)
+                prediction = prediction.float().clamp(0.0, 1.0)
+                prediction = torch.where(observation_mask, sparse_map, prediction)
+            else:
+                noise = torch.stack(
+                    [
+                        make_task2_sample_noise(
+                            protocol=cfg.canonical_payload()["protocol"],
+                            array_size=cfg.array_size,
+                            split="test",
+                            sample_key=str(metadata["sample_key"]),
+                            shape=tuple(target.shape[1:]),
+                            base_seed=cfg.seed,
+                            dtype=target.dtype,
+                        )
+                        for metadata in batch["metadata"]
+                    ]
+                ).to(device, dtype=target.dtype)
+                prediction = random_task2_euler_cfg_sample(
+                    model,
+                    condition=condition,
+                    x0=noise,
+                    sparse_map=sparse_map,
+                    observation_mask=observation_mask,
+                    cfg_scale=_PINNED_FM_CFG_SCALE,
+                    steps=_PINNED_FM_EULER_STEPS,
+                    use_amp=cfg.use_amp,
+                )
         accumulator.update(
             prediction,
             target,

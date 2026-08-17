@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--array-size", choices=("8x8", "16x16", "32x32"), required=True)
     parser.add_argument("--variant", choices=("feature4", "feature5_mask"), default="feature4")
+    parser.add_argument("--mode", choices=("regression", "pinned_fm"), default="regression")
     parser.add_argument("--max-epochs", type=int, default=100)
     parser.add_argument("--early-stopping-patience", type=int, default=25)
     parser.add_argument("--observed-loss-weight", type=float, default=100.0)
@@ -43,7 +44,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=arguments.run_root,
         array_size=arguments.array_size,
         variant=arguments.variant,
-        mode="regression",
+        mode=arguments.mode,
         max_epochs=arguments.max_epochs,
         early_stopping_patience=arguments.early_stopping_patience,
         observed_loss_weight=arguments.observed_loss_weight,

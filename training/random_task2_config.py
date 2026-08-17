@@ -61,8 +61,8 @@ class RandomTask2TrainConfig:
             raise RandomTask2ConfigError(f"unsupported array size: {self.array_size}")
         if self.variant not in ("feature4", "feature5_mask"):
             raise RandomTask2ConfigError(f"unsupported condition variant: {self.variant}")
-        if self.mode != "regression":
-            raise RandomTask2ConfigError("v3 pilot currently supports mode='regression' only")
+        if self.mode not in ("regression", "pinned_fm"):
+            raise RandomTask2ConfigError(f"unsupported train mode: {self.mode}")
         if self.model_size != "lite":
             raise RandomTask2ConfigError("random Task 2 is Lite only for the pilot")
         for name in ("max_epochs", "early_stopping_patience", "num_workers"):
