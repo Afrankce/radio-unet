@@ -35,7 +35,7 @@ from evaluation.visualization import (
 from experiments.multiconfig_manifest import canonical_json_bytes
 from experiments.provenance import sha256_file
 from training.checkpointing import CheckpointIdentity, TrainerState, load_ema_for_evaluation
-from training.model_factory import build_locked_radioflow
+from training.model_factory import build_same_frequency_backbone
 from training.multiconfig_trainer import seed_worker, seed_everything
 from training.same_frequency_config import SameFrequencyTrainConfig
 from training.same_frequency_trainer import (
@@ -61,6 +61,59 @@ METRICS_PER_FREQUENCY_COLUMNS = (
 
 class SameFrequencyEvaluationError(RuntimeError):
     """Same-frequency CFG selection or test output violates its protocol."""
+
+
+def _cfg_candidates(cfg: Any) -> tuple[float, ...]:
+    raw = getattr(cfg, "cfg_candidates", CFG_CANDIDATES)
+    try:
+        candidates = tuple(float(scale) for scale in raw)
+    except (TypeError, ValueError) as error:
+        raise SameFrequencyEvaluationError("CFG candidates must be numeric") from error
+    if (
+        not candidates
+        or len(set(candidates)) != len(candidates)
+        or any(not math.isfinite(scale) or scale <= 0.0 for scale in candidates)
+    ):
+        raise SameFrequencyEvaluationError(
+            "CFG candidates must be unique positive finite values"
+        )
+    return candidates
+
+
+def _select_cfg_candidate(
+    candidate_metrics: Mapping[float, Mapping[str, Any]],
+    candidates: tuple[float, ...],
+) -> float:
+    if candidates == CFG_CANDIDATES:
+        return select_cfg_candidate(candidate_metrics)
+    if set(candidate_metrics) != set(candidates):
+        raise SameFrequencyEvaluationError("CFG candidate grid is not the locked grid")
+    ranked: list[tuple[float, float]] = []
+    for scale in candidates:
+        try:
+            rmse = float(candidate_metrics[scale]["db_rmse"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SameFrequencyEvaluationError(
+                f"CFG {scale} has no valid db_rmse"
+            ) from error
+        if not math.isfinite(rmse) or rmse < 0.0:
+            raise SameFrequencyEvaluationError(
+                f"CFG {scale} db_rmse is invalid: {rmse}"
+            )
+        ranked.append((rmse, scale))
+    return min(ranked)[1]
+
+
+def _experiment_name(cfg: Any) -> str:
+    try:
+        name = cfg.scientific_payload()["experiment"]
+    except (AttributeError, KeyError, TypeError) as error:
+        raise SameFrequencyEvaluationError(
+            "same-frequency config lacks an experiment identity"
+        ) from error
+    if not isinstance(name, str) or not name:
+        raise SameFrequencyEvaluationError("experiment identity must be non-empty")
+    return name
 
 
 @dataclass(frozen=True)
@@ -152,7 +205,7 @@ def _prepare_evaluation(
         raise SameFrequencyEvaluationError("evaluation device must be CPU or CUDA")
     context = preflight_same_frequency(cfg)
     seed_everything(cfg.seed)
-    model = build_locked_radioflow(cfg.model_size).to(device)
+    model = build_same_frequency_backbone(cfg.model_size).to(device)
     checkpoint_path = cfg.run_dir / "best.pt"
     if not checkpoint_path.is_file():
         raise SameFrequencyEvaluationError(f"best checkpoint is missing: {checkpoint_path}")
@@ -255,21 +308,22 @@ def build_cfg_selection_payload(
     prepared: PreparedSameFrequencyEvaluation,
     candidate_metrics: Mapping[float, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    if set(candidate_metrics) != set(CFG_CANDIDATES):
+    candidates = _cfg_candidates(prepared.cfg)
+    if set(candidate_metrics) != set(candidates):
         raise SameFrequencyEvaluationError("CFG candidate grid is not the locked grid")
-    selected_scale = select_cfg_candidate(candidate_metrics)
+    selected_scale = _select_cfg_candidate(candidate_metrics, candidates)
     epoch, best_rmse = _validate_best_checkpoint_state(prepared.trainer_state)
     return {
         "schema_version": 1,
-        "experiment": "same_frequency_6.7_single_beam",
+        "experiment": _experiment_name(prepared.cfg),
         "array_size": prepared.cfg.array_size,
         "model_size": prepared.cfg.model_size,
         "beam_id": prepared.context.beam_id,
         "config_id": prepared.context.config_id,
-        "candidates": list(CFG_CANDIDATES),
+        "candidates": list(candidates),
         "candidate_metrics": {
             f"{scale:.1f}": metrics_for_json(candidate_metrics[scale])
-            for scale in CFG_CANDIDATES
+            for scale in candidates
         },
         "frequency_hz": prepared.cfg.test_frequency_hz,
         "train_frequency_hz": prepared.cfg.train_frequency_hz,
@@ -320,6 +374,7 @@ def load_cfg_selection(
     context: SameFrequencyContext,
 ) -> dict[str, Any]:
     payload = _read_canonical_json(path, "same-frequency CFG selection")
+    candidates = _cfg_candidates(cfg)
     required = {
         "schema_version",
         "experiment",
@@ -350,12 +405,12 @@ def load_cfg_selection(
         raise SameFrequencyEvaluationError("same-frequency CFG selection keys mismatch")
     if (
         payload["schema_version"] != 1
-        or payload["experiment"] != "same_frequency_6.7_single_beam"
+        or payload["experiment"] != _experiment_name(cfg)
         or payload["array_size"] != cfg.array_size
         or payload["model_size"] != cfg.model_size
         or payload["beam_id"] != context.beam_id
         or payload["config_id"] != context.config_id
-        or payload["candidates"] != list(CFG_CANDIDATES)
+        or payload["candidates"] != list(candidates)
         or payload["frequency_hz"] != cfg.test_frequency_hz
         or payload["train_frequency_hz"] != cfg.train_frequency_hz
         or payload["validation_frequency_hz"] != cfg.val_frequency_hz
@@ -373,11 +428,11 @@ def load_cfg_selection(
     raw_metrics = payload["candidate_metrics"]
     if not isinstance(raw_metrics, Mapping):
         raise SameFrequencyEvaluationError("candidate metrics must be an object")
-    expected_keys = {f"{scale:.1f}" for scale in CFG_CANDIDATES}
+    expected_keys = {f"{scale:.1f}" for scale in candidates}
     if set(raw_metrics) != expected_keys:
         raise SameFrequencyEvaluationError("candidate metric grid mismatch")
     candidate_metrics: dict[float, Mapping[str, Any]] = {}
-    for scale in CFG_CANDIDATES:
+    for scale in candidates:
         metrics = raw_metrics[f"{scale:.1f}"]
         if not isinstance(metrics, Mapping) or metrics.get("n_samples") != cfg.val_samples:
             raise SameFrequencyEvaluationError(
@@ -390,7 +445,10 @@ def load_cfg_selection(
         if not math.isfinite(rmse) or rmse < 0.0:
             raise SameFrequencyEvaluationError("candidate db_rmse is invalid")
         candidate_metrics[scale] = metrics
-    if float(payload["selected_scale"]) != select_cfg_candidate(candidate_metrics):
+    if float(payload["selected_scale"]) != _select_cfg_candidate(
+        candidate_metrics,
+        candidates,
+    ):
         raise SameFrequencyEvaluationError("selected CFG does not match candidate metrics")
     if int(payload["selected_epoch"]) <= 0:
         raise SameFrequencyEvaluationError("selected epoch must be positive")
@@ -403,6 +461,7 @@ def run_cfg_selection(
     results_root: str | Path,
 ) -> dict[str, Any]:
     prepared = _prepare_evaluation(cfg, device)
+    candidates = _cfg_candidates(cfg)
     selection_path = cfg.run_dir / "cfg_selection.json"
     final_manifest = Path(results_root) / "run_manifest.json"
     if selection_path.exists():
@@ -430,7 +489,7 @@ def run_cfg_selection(
         )
     candidate_metrics = {
         scale: _evaluate_validation_candidate(prepared, scale)
-        for scale in CFG_CANDIDATES
+        for scale in candidates
     }
     if not math.isclose(
         float(candidate_metrics[1.0]["db_rmse"]),
@@ -503,7 +562,7 @@ def _metrics_test_payload(
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
-        "experiment": "same_frequency_6.7_single_beam",
+        "experiment": _experiment_name(prepared.cfg),
         "array_size": prepared.cfg.array_size,
         "model_size": prepared.cfg.model_size,
         "split": "test",
@@ -687,7 +746,7 @@ def _write_test_transaction(
         {
             "schema_version": 1,
             "status": "complete",
-            "experiment": "same_frequency_6.7_single_beam",
+            "experiment": _experiment_name(prepared.cfg),
             "array_size": prepared.cfg.array_size,
             "model_size": prepared.cfg.model_size,
             "split": "test",
