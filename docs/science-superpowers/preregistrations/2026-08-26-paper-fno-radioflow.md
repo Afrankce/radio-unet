@@ -1,6 +1,6 @@
 # Pre-registration: paper-faithful FNO for RadioFlow single-beam prediction
 
-**Frozen at commit:** stamped by the preregistration freeze operation
+**Frozen at commit:** 122eb2f712498719cf0a11f11781501f05e47d34
 **Question doc:** `docs/science-superpowers/questions/2026-08-26-paper-fno-radioflow-singlebeam.md`
 **Analysis plan:** `docs/science-superpowers/plans/2026-08-26-paper-fno-radioflow.md`
 **Architecture spec:** `docs/superpowers/specs/2026-08-26-paper-fno-radioflow-design.md`
