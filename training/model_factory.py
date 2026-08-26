@@ -2,10 +2,22 @@ from __future__ import annotations
 
 from typing import Literal
 
+import torch
+
 from config import MODEL_FEATURES
+from model.fno import (
+    ConditionalFNO2d,
+    count_real_scalar_parameters,
+    count_tensor_parameters,
+)
 from model.model import DiffUNet
 from model.unet.basic_unet import BasicUNetEncoder
 from model.unet.basic_unet_denose import BasicUNetDe
+from training.same_frequency_fno_config import (
+    PAPER_FNO_MODEL_SIZE,
+    PAPER_FNO_REAL_SCALAR_PARAMETERS,
+    PAPER_FNO_TENSOR_PARAMETERS,
+)
 
 
 EXPECTED_FEATURES = {
@@ -26,6 +38,33 @@ TASK2_SPARSE_PARAMETER_COUNTS = {
 
 class FrameworkLockError(RuntimeError):
     """The live RadioFlow architecture differs from the approved benchmark."""
+
+
+def build_paper_fno() -> ConditionalFNO2d:
+    network = ConditionalFNO2d()
+    if network.condition_channels != 3:
+        raise FrameworkLockError("paper FNO must consume three condition channels")
+    if network.width != 40 or (network.modes1, network.modes2) != (12, 12):
+        raise FrameworkLockError("paper FNO width or retained modes changed")
+    if network.padding != 9 or len(network.spectral_layers) != 4:
+        raise FrameworkLockError("paper FNO padding or layer count changed")
+    if network.cfg_drop_prob != 0.25:
+        raise FrameworkLockError("paper FNO CFG dropout must remain 0.25")
+    if count_tensor_parameters(network) != PAPER_FNO_TENSOR_PARAMETERS:
+        raise FrameworkLockError("paper FNO tensor parameter count changed")
+    if count_real_scalar_parameters(network) != PAPER_FNO_REAL_SCALAR_PARAMETERS:
+        raise FrameworkLockError("paper FNO real scalar parameter count changed")
+    return network
+
+
+def build_same_frequency_backbone(model_size: str) -> torch.nn.Module:
+    if model_size == PAPER_FNO_MODEL_SIZE:
+        return build_paper_fno()
+    if model_size in EXPECTED_PARAMETER_COUNTS:
+        return build_locked_radioflow(model_size)
+    raise FrameworkLockError(
+        f"unsupported same-frequency model size: {model_size!r}"
+    )
 
 
 def build_locked_radioflow(
