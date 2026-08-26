@@ -300,6 +300,8 @@ class MultiConfigSRMTrainer:
         device: torch.device,
         train_generator: torch.Generator,
         identity: CheckpointIdentity,
+        *,
+        scaler: Any | None = None,
     ) -> None:
         parameters = tuple(model.parameters())
         if not parameters:
@@ -336,10 +338,12 @@ class MultiConfigSRMTrainer:
             total_steps=cfg.planned_optimizer_steps,
             warmup_steps=cfg.warmup_steps,
         )
-        self.scaler = torch.amp.GradScaler(
-            "cuda",
-            enabled=device.type == "cuda" and cfg.use_amp,
-        )
+        self.scaler = scaler
+        if self.scaler is None:
+            self.scaler = torch.amp.GradScaler(
+                "cuda",
+                enabled=device.type == "cuda" and cfg.use_amp,
+            )
         self.completed_epochs = 0
         self.next_epoch_index = 0
         self.optimizer_step = 0

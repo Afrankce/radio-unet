@@ -104,7 +104,8 @@ def test_training_condition_dropout_zeros_only_condition_without_mutating_input(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_locked_fno_runs_padded_fft_under_cuda_float16_autocast() -> None:
+def test_locked_fno_runs_padded_fft_under_cuda_float16_autocast(monkeypatch) -> None:
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     model = ConditionalFNO2d().cuda().eval()
     condition = torch.randn(1, 3, 256, 256, device="cuda")
     state = torch.randn(1, 1, 256, 256, device="cuda")
@@ -117,4 +118,3 @@ def test_locked_fno_runs_padded_fft_under_cuda_float16_autocast() -> None:
 
     assert output.shape == state.shape
     assert torch.isfinite(output).all()
-

@@ -146,6 +146,7 @@ def test_one_step_fno_smoke_writes_strict_fresh_checkpoint(
 ) -> None:
     import training.same_frequency_fno_trainer as module
 
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     monkeypatch.setattr(module, "preflight_same_frequency", lambda _cfg: _context())
     monkeypatch.setattr(module, "build_same_frequency_loaders", _tiny_loaders)
     monkeypatch.setattr(module, "build_same_frequency_backbone", _tiny_fno)

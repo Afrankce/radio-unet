@@ -8,6 +8,7 @@ import torch
 
 from train import ModelEMA
 from training.checkpointing import load_checkpoint_strict
+from training.complex_grad_scaler import ComplexGradScaler
 from training.config import InvocationControls
 from training.model_factory import build_same_frequency_backbone
 from training.multiconfig_trainer import (
@@ -87,7 +88,7 @@ def _validate_fno_smoke_checkpoint_fresh(
         total_steps=cfg.planned_optimizer_steps,
         warmup_steps=cfg.warmup_steps,
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
+    scaler = ComplexGradScaler("cuda", enabled=scaler_enabled)
     generator = torch.Generator(device="cpu").manual_seed(cfg.seed)
     state = load_checkpoint_strict(
         checkpoint,
@@ -166,6 +167,10 @@ def run_same_frequency_fno_training(
         device,
         train_generator,
         identity,
+        scaler=ComplexGradScaler(
+            "cuda",
+            enabled=device.type == "cuda" and cfg.use_amp,
+        ),
     )
     if smoke:
         result = trainer.run_smoke(int(controls.smoke_optimizer_steps))
