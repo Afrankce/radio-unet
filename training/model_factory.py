@@ -5,6 +5,7 @@ from typing import Literal
 import torch
 
 from config import MODEL_FEATURES
+from model.attention_fno import AttentionConditionedFNO2d
 from model.fno import (
     ConditionalFNO2d,
     count_real_scalar_parameters,
@@ -34,6 +35,7 @@ SPARSE_PARAMETER_COUNTS = {
 TASK2_SPARSE_PARAMETER_COUNTS = {
     ("lite", "feature5_mask"): 3_996_011,
 }
+ATTENTION_FNO_MODEL_SIZE = "attention_fno_lite"
 
 
 class FrameworkLockError(RuntimeError):
@@ -57,7 +59,24 @@ def build_paper_fno() -> ConditionalFNO2d:
     return network
 
 
+def build_attention_fno() -> AttentionConditionedFNO2d:
+    network = AttentionConditionedFNO2d()
+    if network.condition_channels != 3:
+        raise FrameworkLockError("attention FNO must consume three condition channels")
+    if network.width != 40 or (network.modes1, network.modes2) != (12, 12):
+        raise FrameworkLockError("attention FNO width or retained modes changed")
+    if network.padding != 9 or len(network.blocks) != 4:
+        raise FrameworkLockError("attention FNO padding or layer count changed")
+    if network.encoder_features != EXPECTED_FEATURES["lite"]:
+        raise FrameworkLockError("attention FNO condition encoder features changed")
+    if network.cfg_drop_prob != 0.25:
+        raise FrameworkLockError("attention FNO CFG dropout must remain 0.25")
+    return network
+
+
 def build_same_frequency_backbone(model_size: str) -> torch.nn.Module:
+    if model_size == ATTENTION_FNO_MODEL_SIZE:
+        return build_attention_fno()
     if model_size == PAPER_FNO_MODEL_SIZE:
         return build_paper_fno()
     if model_size in EXPECTED_PARAMETER_COUNTS:
