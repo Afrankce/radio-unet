@@ -19,6 +19,7 @@ from training.same_frequency_fno_config import (
     PAPER_FNO_REAL_SCALAR_PARAMETERS,
     PAPER_FNO_TENSOR_PARAMETERS,
 )
+from training.same_frequency_attention_fno_config import ATTENTION_FNO_MODEL_SIZE
 
 
 EXPECTED_FEATURES = {
@@ -35,7 +36,6 @@ SPARSE_PARAMETER_COUNTS = {
 TASK2_SPARSE_PARAMETER_COUNTS = {
     ("lite", "feature5_mask"): 3_996_011,
 }
-ATTENTION_FNO_MODEL_SIZE = "attention_fno_lite"
 
 
 class FrameworkLockError(RuntimeError):
