@@ -125,13 +125,16 @@ The output is the FM velocity, not a directly regressed radiomap.
 
 ## CFG behavior
 
-Training-time sample-level condition dropout remains `0.25`. A dropped sample
-zeros the raw three-channel condition before both the condition encoder and the
-raw lifting path. This makes unconditional training genuinely condition-free.
+Training-time sample-level condition dropout remains `0.25`. The real condition
+is encoded first, then a dropped sample jointly zeros the raw three-channel
+condition used by the lifting path and all five already-computed condition
+embeddings. This is genuinely condition-free while avoiding an exact
+zero-variance image in the condition encoder's InstanceNorm layers under AMP.
 
 At inference, CFG scale `1.0` returns the conditional velocity directly.
-Other finite scales use a condition encoded from zeros for the unconditional
-branch and the real condition for the conditional branch.
+Other finite scales use a zero raw condition and zero tensors shaped like the
+five conditional embeddings for the unconditional branch; the encoder is not
+re-run on an all-zero image. The conditional branch uses the real condition.
 
 ## Flow Matching and sampling
 
@@ -185,4 +188,3 @@ GPU 3 remains unallocated. The new result root is
    full-state checkpoint before formal launch.
 5. Formal launch is accepted only when three live PIDs, three logs, three
    immutable configs, and initial checkpoint/metric activity are observed.
-

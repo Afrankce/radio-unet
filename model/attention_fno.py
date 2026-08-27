@@ -337,15 +337,20 @@ class AttentionConditionedFNO2d(nn.Module):
         self._validate_state_and_condition(image, x)
 
         condition = image
-        embeddings = embedding
+        embeddings: Sequence[Tensor] = (
+            self.embed_model(image) if embedding is None else embedding
+        )
         if self.training and self.cfg_drop_prob > 0.0:
             drop = (
                 torch.rand(condition.shape[0], device=condition.device)
                 < self.cfg_drop_prob
             )
             if bool(drop.any()):
-                condition = condition.masked_fill(drop.view(-1, 1, 1, 1), 0.0)
-                embeddings = None
+                drop_mask = drop.view(-1, 1, 1, 1)
+                condition = condition.masked_fill(drop_mask, 0.0)
+                embeddings = [
+                    value.masked_fill(drop_mask, 0.0) for value in embeddings
+                ]
         return self._velocity(condition, x, step, embeddings)
 
     def forward_with_cfg(
@@ -372,11 +377,14 @@ class AttentionConditionedFNO2d(nn.Module):
         if float(cfg_scale) == 1.0:
             return conditional
         unconditional_image = torch.zeros_like(image)
+        unconditional_embeddings = [
+            torch.zeros_like(value) for value in conditional_embeddings
+        ]
         unconditional = self._velocity(
             unconditional_image,
             x,
             step,
-            self.embed_model(unconditional_image),
+            unconditional_embeddings,
         )
         return unconditional + float(cfg_scale) * (conditional - unconditional)
 
@@ -386,4 +394,3 @@ __all__ = [
     "DEFAULT_ENCODER_FEATURES",
     "FullResolutionFNOBlock",
 ]
-

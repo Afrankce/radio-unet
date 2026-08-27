@@ -163,10 +163,44 @@ def test_full_condition_dropout_matches_explicit_zero_condition() -> None:
     model.train()
     dropped = model(image=condition, x=state, step=time)
     model.eval()
-    expected = model(image=torch.zeros_like(condition), x=state, step=time)
+    expected = model.forward_with_cfg(
+        image=condition,
+        x=state,
+        step=time,
+        cfg_scale=0.0,
+    )
 
     assert torch.equal(condition, original)
     assert torch.allclose(dropped, expected, atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AMP is required")
+def test_full_condition_dropout_has_finite_amp_backward() -> None:
+    torch.manual_seed(19)
+    model = _small_model(cfg_drop_prob=1.0).cuda().train()
+    condition = torch.randn(2, 3, 32, 32, device="cuda")
+    state = torch.randn(2, 1, 32, 32, device="cuda")
+    target = torch.randn_like(state)
+    time = torch.tensor([0.2, 0.8], device="cuda")
+
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        output = model(image=condition, x=state, step=time)
+        loss = (output - target).square().mean()
+    loss.backward()
+
+    nonfinite = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.grad is not None
+        and (
+            not bool(torch.isfinite(parameter.grad.real).all())
+            or (
+                parameter.grad.is_complex()
+                and not bool(torch.isfinite(parameter.grad.imag).all())
+            )
+        )
+    ]
+    assert nonfinite == []
 
 
 def test_attention_fno_rejects_invalid_state_condition_and_time() -> None:
