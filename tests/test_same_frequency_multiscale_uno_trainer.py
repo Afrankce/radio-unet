@@ -339,6 +339,9 @@ def test_auto_and_explicit_resume_restore_every_checkpoint_component(
             fresh_rng = copy.deepcopy(_process_rng_state(self.train_generator))
             observed["fresh_rng_states"].append(fresh_rng)
             for source, saved in payload["rng_state"].items():
+                if source == "torch_cuda" and not saved:
+                    assert fresh_rng[source] == []
+                    continue
                 assert not _nested_equal(fresh_rng[source], saved), (
                     f"checkpoint {source} RNG state did not differ from fresh state"
                 )
