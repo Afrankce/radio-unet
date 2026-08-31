@@ -6,6 +6,7 @@ import torch
 
 from config import MODEL_FEATURES
 from model.attention_fno import AttentionConditionedFNO2d
+from model.attention_multiscale_uno import AttentionMultiscaleUNO2d
 from model.fno import (
     ConditionalFNO2d,
     count_real_scalar_parameters,
@@ -13,13 +14,18 @@ from model.fno import (
 )
 from model.model import DiffUNet
 from model.unet.basic_unet import BasicUNetEncoder
-from model.unet.basic_unet_denose import BasicUNetDe
+from model.unet.basic_unet_denose import BasicUNetDe, CrossAttention
 from training.same_frequency_fno_config import (
     PAPER_FNO_MODEL_SIZE,
     PAPER_FNO_REAL_SCALAR_PARAMETERS,
     PAPER_FNO_TENSOR_PARAMETERS,
 )
 from training.same_frequency_attention_fno_config import ATTENTION_FNO_MODEL_SIZE
+from training.same_frequency_multiscale_uno_config import (
+    MULTISCALE_UNO_MODEL_SIZE,
+    MULTISCALE_UNO_REAL_SCALAR_PARAMETERS,
+    MULTISCALE_UNO_TENSOR_PARAMETERS,
+)
 
 
 EXPECTED_FEATURES = {
@@ -74,7 +80,38 @@ def build_attention_fno() -> AttentionConditionedFNO2d:
     return network
 
 
+def build_attention_multiscale_uno() -> AttentionMultiscaleUNO2d:
+    network = AttentionMultiscaleUNO2d()
+    if network.condition_channels != 3:
+        raise FrameworkLockError("multiscale UNO must consume three condition channels")
+    if tuple(network.state_channels) != (32, 64, 128, 256, 256):
+        raise FrameworkLockError("multiscale UNO state channels changed")
+    if network.operator_width != 24:
+        raise FrameworkLockError("multiscale UNO operator width changed")
+    if tuple(network.operator_modes) != (12, 12, 8, 4, 4):
+        raise FrameworkLockError("multiscale UNO operator modes changed")
+    if tuple(network.operator_padding) != (9, 5, 3, 2, 1):
+        raise FrameworkLockError("multiscale UNO operator padding changed")
+    if tuple(network.encoder_features) != EXPECTED_FEATURES["lite"]:
+        raise FrameworkLockError("multiscale UNO condition encoder features changed")
+    if (
+        len(network.encoder_stages) != 4
+        or len(network.decoder_stages) != 4
+        or sum(isinstance(module, CrossAttention) for module in network.modules()) != 9
+    ):
+        raise FrameworkLockError("multiscale UNO must retain nine attention stages")
+    if network.cfg_drop_prob != 0.25:
+        raise FrameworkLockError("multiscale UNO CFG dropout must remain 0.25")
+    if count_tensor_parameters(network) != MULTISCALE_UNO_TENSOR_PARAMETERS:
+        raise FrameworkLockError("multiscale UNO tensor parameter count changed")
+    if count_real_scalar_parameters(network) != MULTISCALE_UNO_REAL_SCALAR_PARAMETERS:
+        raise FrameworkLockError("multiscale UNO real scalar parameter count changed")
+    return network
+
+
 def build_same_frequency_backbone(model_size: str) -> torch.nn.Module:
+    if model_size == MULTISCALE_UNO_MODEL_SIZE:
+        return build_attention_multiscale_uno()
     if model_size == ATTENTION_FNO_MODEL_SIZE:
         return build_attention_fno()
     if model_size == PAPER_FNO_MODEL_SIZE:
