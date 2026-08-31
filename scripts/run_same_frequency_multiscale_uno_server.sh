@@ -20,6 +20,7 @@ DATASET_ROOT="${RADIOFLOW_MULTISCALE_UNO_DATASET_ROOT:-/home/wys/radioflow_20260
 RESULT_ROOT="${RADIOFLOW_MULTISCALE_UNO_RESULT_ROOT:-/home/wys/radioflow_20260823/results/multiscale_uno_samefreq_6.7ghz}"
 ENV_FILE="${RADIOFLOW_MULTISCALE_UNO_ENV_FILE:-/home/wys/radioflow_20260823/radioflow_remote_env.sh}"
 PROC_ROOT="${RADIOFLOW_MULTISCALE_UNO_TEST_PROC_ROOT:-/proc}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 MANIFEST_ROOT="$DATASET_ROOT/manifests"
 HEIGHT_STATS="$MANIFEST_ROOT/height_stats_train.json"
 
@@ -29,7 +30,7 @@ GPUS=(0 1 2)
 build_train_command() {
   local array_size="$1"
   TRAIN_COMMAND=(
-    python -u "$CODE_ROOT/run_same_frequency_multiscale_uno.py" train
+    "$PYTHON_BIN" -u "$CODE_ROOT/run_same_frequency_multiscale_uno.py" train
     --dataset-root "$DATASET_ROOT"
     --manifest-path "$MANIFEST_ROOT/manifest_samefreq_6.7ghz_${array_size}_0deg.jsonl"
     --height-stats-path "$HEIGHT_STATS"
@@ -44,7 +45,7 @@ build_evaluation_command() {
   local array_size="$1"
   local command="$2"
   EVALUATION_COMMAND=(
-    python -u "$CODE_ROOT/run_same_frequency_multiscale_uno.py" "$command"
+    "$PYTHON_BIN" -u "$CODE_ROOT/run_same_frequency_multiscale_uno.py" "$command"
     --dataset-root "$DATASET_ROOT"
     --manifest-path "$MANIFEST_ROOT/manifest_samefreq_6.7ghz_${array_size}_0deg.jsonl"
     --height-stats-path "$HEIGHT_STATS"
@@ -130,35 +131,24 @@ capture_process_start_ticks() {
 }
 
 FLOCK_FDS=()
-FALLBACK_LOCKS=()
-FALLBACK_LOCK_FINGERPRINTS=()
-LAUNCHED_PIDS=()
-PUBLISHED_PID_PATHS=()
-PUBLISHED_PIDS=()
-PUBLISHED_START_TICKS=()
-PUBLISHED_FINGERPRINTS=()
-LOCK_OWNER_TEMP=""
-PID_METADATA_TEMP=""
-LAUNCHER_START_TICKS=""
+CHILD_ROLLBACK_RECORDS=()
+CHILD_RECORD_SEPARATOR=$'\034'
+SPAWN_RECORD_CRITICAL=0
+PENDING_SIGNAL_STATUS=0
 TRANSACTION_COMMITTED=0
 
 write_pid_metadata_atomic() {
   local pid_path="$1"
-  local pid="$2"
-  local start_ticks="$3"
-  local owner_fingerprint="$4"
-  PID_METADATA_TEMP="${pid_path}.tmp.$$"
+  local temp_path="$2"
+  local pid="$3"
+  local start_ticks="$4"
+  local owner_fingerprint="$5"
   (
     umask 077
     printf 'pid=%s\nstart_ticks=%s\nowner_fingerprint=%s\n' \
-      "$pid" "$start_ticks" "$owner_fingerprint" > "$PID_METADATA_TEMP"
+      "$pid" "$start_ticks" "$owner_fingerprint" > "$temp_path"
   ) || return 1
-  mv -f -- "$PID_METADATA_TEMP" "$pid_path" || return 1
-  PID_METADATA_TEMP=""
-}
-
-flock_is_available() {
-  command -v flock >/dev/null 2>&1 && flock --version >/dev/null 2>&1
+  mv -f -- "$temp_path" "$pid_path" || return 1
 }
 
 close_flock_fd() {
@@ -180,108 +170,6 @@ acquire_flock_locks() {
   done
 }
 
-fallback_lock_owner_is_active() {
-  local owner_path="$1"
-  local current_start_ticks
-  read_pid_metadata "$owner_path" || return 1
-  current_start_ticks="$(read_process_start_ticks "$METADATA_PID")" || return 1
-  [[ "$current_start_ticks" == "$METADATA_START_TICKS" ]]
-}
-
-wait_for_fallback_lock_owner() {
-  local owner_path="$1"
-  local attempt
-  for ((attempt = 0; attempt < 50; attempt++)); do
-    [[ -f "$owner_path" ]] && return 0
-    sleep 0.01
-  done
-  return 1
-}
-
-reclaim_stale_fallback_lock() {
-  local lock_path="$1"
-  local owner_path="$lock_path/owner"
-  local owner_snapshot current_snapshot
-  if [[ -f "$owner_path" ]]; then
-    fallback_lock_owner_is_active "$owner_path" && return 1
-    owner_snapshot="$(<"$owner_path")"
-    current_snapshot="$(<"$owner_path")"
-    [[ "$current_snapshot" == "$owner_snapshot" ]] || return 1
-    rm -f -- "$owner_path" || return 1
-  fi
-  rmdir -- "$lock_path" 2>/dev/null
-}
-
-acquire_one_fallback_lock() {
-  local lock_path="$1"
-  local owner_fingerprint="$2"
-  local owner_path="$lock_path/owner"
-  local attempt
-  for ((attempt = 0; attempt < 3; attempt++)); do
-    LOCK_OWNER_TEMP="${lock_path}.owner.tmp.$$"
-    (
-      umask 077
-      printf 'pid=%s\nstart_ticks=%s\nowner_fingerprint=%s\n' \
-        "$$" "$LAUNCHER_START_TICKS" "$owner_fingerprint" > "$LOCK_OWNER_TEMP"
-    ) || return 1
-    if mkdir -- "$lock_path" 2>/dev/null; then
-      if ln -- "$LOCK_OWNER_TEMP" "$owner_path" 2>/dev/null; then
-        rm -f -- "$LOCK_OWNER_TEMP"
-        LOCK_OWNER_TEMP=""
-        FALLBACK_LOCKS+=("$lock_path")
-        FALLBACK_LOCK_FINGERPRINTS+=("$owner_fingerprint")
-        return 0
-      fi
-      rm -f -- "$LOCK_OWNER_TEMP"
-      LOCK_OWNER_TEMP=""
-      rmdir -- "$lock_path" 2>/dev/null || true
-      return 1
-    fi
-    rm -f -- "$LOCK_OWNER_TEMP"
-    LOCK_OWNER_TEMP=""
-    if wait_for_fallback_lock_owner "$owner_path" && \
-      fallback_lock_owner_is_active "$owner_path"; then
-      return 1
-    fi
-    reclaim_stale_fallback_lock "$lock_path" || return 1
-  done
-  return 1
-}
-
-acquire_fallback_locks() {
-  local index array_size lock_path
-  LAUNCHER_START_TICKS="$(read_process_start_ticks "$$")" || {
-    echo "could not capture fallback lock owner identity for launcher PID $$" >&2
-    return 1
-  }
-  for index in "${!ARRAYS[@]}"; do
-    array_size="${ARRAYS[$index]}"
-    lock_path="$RESULT_ROOT/pids/train_${array_size}.lock"
-    if ! acquire_one_fallback_lock "$lock_path" "${OWNER_FINGERPRINTS[$index]}"; then
-      echo "training launch lock is already held for $array_size: $lock_path" >&2
-      return 1
-    fi
-  done
-}
-
-release_fallback_locks() {
-  local index lock_path owner_path expected_fingerprint
-  for ((index = ${#FALLBACK_LOCKS[@]} - 1; index >= 0; index--)); do
-    lock_path="${FALLBACK_LOCKS[$index]}"
-    owner_path="$lock_path/owner"
-    expected_fingerprint="${FALLBACK_LOCK_FINGERPRINTS[$index]}"
-    if read_pid_metadata "$owner_path" && \
-      [[ "$METADATA_PID" == "$$" ]] && \
-      [[ "$METADATA_START_TICKS" == "$LAUNCHER_START_TICKS" ]] && \
-      [[ "$METADATA_OWNER_FINGERPRINT" == "$expected_fingerprint" ]]; then
-      rm -f -- "$owner_path"
-      rmdir -- "$lock_path" 2>/dev/null || true
-    fi
-  done
-  FALLBACK_LOCKS=()
-  FALLBACK_LOCK_FINGERPRINTS=()
-}
-
 release_flock_locks() {
   local index
   for ((index = ${#FLOCK_FDS[@]} - 1; index >= 0; index--)); do
@@ -290,52 +178,116 @@ release_flock_locks() {
   FLOCK_FDS=()
 }
 
-remove_matching_published_pid_files() {
-  local index pid_path
-  for ((index = ${#PUBLISHED_PID_PATHS[@]} - 1; index >= 0; index--)); do
-    pid_path="${PUBLISHED_PID_PATHS[$index]}"
-    if read_pid_metadata "$pid_path" && \
-      [[ "$METADATA_PID" == "${PUBLISHED_PIDS[$index]}" ]] && \
-      [[ "$METADATA_START_TICKS" == "${PUBLISHED_START_TICKS[$index]}" ]] && \
-      [[ "$METADATA_OWNER_FINGERPRINT" == "${PUBLISHED_FINGERPRINTS[$index]}" ]]; then
-      rm -f -- "$pid_path"
-    fi
+close_flock_fds_for_child() {
+  local lock_fd
+  for lock_fd in "${FLOCK_FDS[@]}"; do
+    close_flock_fd "$lock_fd"
   done
 }
 
-rollback_launched_processes() {
-  local pid
-  for pid in "${LAUNCHED_PIDS[@]}"; do
-    kill -TERM "$pid" 2>/dev/null || true
+read_child_rollback_record() {
+  local record="$1"
+  local extra
+  IFS="$CHILD_RECORD_SEPARATOR" read -r \
+    CHILD_PID CHILD_PID_PATH CHILD_TEMP_PATH CHILD_OWNER_FINGERPRINT \
+    CHILD_START_TICKS extra <<< "$record"
+  [[ "$CHILD_PID" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ -n "$CHILD_PID_PATH" && -n "$CHILD_TEMP_PATH" ]] || return 1
+  [[ "$CHILD_OWNER_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$CHILD_START_TICKS" == unknown || \
+    "$CHILD_START_TICKS" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ -z "$extra" ]]
+}
+
+set_child_record_start_ticks() {
+  local index="$1"
+  local start_ticks="$2"
+  read_child_rollback_record "${CHILD_ROLLBACK_RECORDS[$index]}" || return 1
+  CHILD_ROLLBACK_RECORDS[$index]="${CHILD_PID}${CHILD_RECORD_SEPARATOR}\
+${CHILD_PID_PATH}${CHILD_RECORD_SEPARATOR}${CHILD_TEMP_PATH}\
+${CHILD_RECORD_SEPARATOR}${CHILD_OWNER_FINGERPRINT}\
+${CHILD_RECORD_SEPARATOR}${start_ticks}"
+}
+
+child_process_matches_record() {
+  local current_start_ticks
+  if [[ "$CHILD_START_TICKS" == unknown ]]; then
+    kill -0 "$CHILD_PID" 2>/dev/null
+    return
+  fi
+  current_start_ticks="$(read_process_start_ticks "$CHILD_PID")" || return 1
+  [[ "$current_start_ticks" == "$CHILD_START_TICKS" ]]
+}
+
+rollback_tracked_children() {
+  local record
+  for record in "${CHILD_ROLLBACK_RECORDS[@]}"; do
+    read_child_rollback_record "$record" || continue
+    if child_process_matches_record; then
+      kill -TERM "$CHILD_PID" 2>/dev/null || true
+    fi
   done
-  if [[ ${#LAUNCHED_PIDS[@]} -gt 0 ]]; then
+  if [[ ${#CHILD_ROLLBACK_RECORDS[@]} -gt 0 ]]; then
     sleep 0.05
   fi
-  for pid in "${LAUNCHED_PIDS[@]}"; do
-    kill -KILL "$pid" 2>/dev/null || true
+  for record in "${CHILD_ROLLBACK_RECORDS[@]}"; do
+    read_child_rollback_record "$record" || continue
+    if child_process_matches_record; then
+      kill -KILL "$CHILD_PID" 2>/dev/null || true
+    fi
   done
-  for pid in "${LAUNCHED_PIDS[@]}"; do
-    wait "$pid" 2>/dev/null || true
+  for record in "${CHILD_ROLLBACK_RECORDS[@]}"; do
+    read_child_rollback_record "$record" || continue
+    wait "$CHILD_PID" 2>/dev/null || true
   done
+}
+
+remove_matching_child_metadata() {
+  local index record
+  for ((index = ${#CHILD_ROLLBACK_RECORDS[@]} - 1; index >= 0; index--)); do
+    record="${CHILD_ROLLBACK_RECORDS[$index]}"
+    read_child_rollback_record "$record" || continue
+    if [[ "$CHILD_START_TICKS" != unknown ]] && \
+      [[ -f "$CHILD_PID_PATH" ]] && \
+      read_pid_metadata "$CHILD_PID_PATH" && \
+      [[ "$METADATA_PID" == "$CHILD_PID" ]] && \
+      [[ "$METADATA_START_TICKS" == "$CHILD_START_TICKS" ]] && \
+      [[ "$METADATA_OWNER_FINGERPRINT" == "$CHILD_OWNER_FINGERPRINT" ]]; then
+      rm -f -- "$CHILD_PID_PATH"
+    fi
+    rm -f -- "$CHILD_TEMP_PATH"
+  done
+}
+
+handle_train_signal() {
+  local status="$1"
+  if [[ "$SPAWN_RECORD_CRITICAL" -eq 1 ]]; then
+    if [[ "$PENDING_SIGNAL_STATUS" -eq 0 ]]; then
+      PENDING_SIGNAL_STATUS="$status"
+    fi
+    return 0
+  fi
+  exit "$status"
+}
+
+dispatch_pending_train_signal() {
+  local status="$PENDING_SIGNAL_STATUS"
+  PENDING_SIGNAL_STATUS=0
+  if [[ "$status" -ne 0 ]]; then
+    exit "$status"
+  fi
 }
 
 finish_train_transaction() {
   local status="$?"
   set +e
+  set +u
   trap - EXIT HUP INT TERM
+  SPAWN_RECORD_CRITICAL=0
   if [[ "$TRANSACTION_COMMITTED" -ne 1 ]]; then
-    rollback_launched_processes
-    remove_matching_published_pid_files
-    if [[ -n "$PID_METADATA_TEMP" ]]; then
-      rm -f -- "$PID_METADATA_TEMP"
-      PID_METADATA_TEMP=""
-    fi
+    rollback_tracked_children
+    remove_matching_child_metadata
   fi
-  if [[ -n "$LOCK_OWNER_TEMP" ]]; then
-    rm -f -- "$LOCK_OWNER_TEMP"
-    LOCK_OWNER_TEMP=""
-  fi
-  release_fallback_locks
   release_flock_locks
   exit "$status"
 }
@@ -408,6 +360,11 @@ if [[ "$MODE" == "--select-cfg" || "$MODE" == "--test" ]]; then
   exit 0
 fi
 
+if ! command -v flock >/dev/null 2>&1; then
+  echo "util-linux flock is required for --train" >&2
+  exit 1
+fi
+
 OWNER_FINGERPRINTS=()
 for index in "${!ARRAYS[@]}"; do
   array_size="${ARRAYS[$index]}"
@@ -416,15 +373,11 @@ for index in "${!ARRAYS[@]}"; do
 done
 
 trap finish_train_transaction EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'handle_train_signal 129' HUP
+trap 'handle_train_signal 130' INT
+trap 'handle_train_signal 143' TERM
 
-if flock_is_available; then
-  acquire_flock_locks || exit 1
-else
-  acquire_fallback_locks || exit 1
-fi
+acquire_flock_locks || exit 1
 
 for index in "${!ARRAYS[@]}"; do
   array_size="${ARRAYS[$index]}"
@@ -445,23 +398,32 @@ for index in "${!ARRAYS[@]}"; do
   build_train_command "$array_size"
   log_path="$RESULT_ROOT/logs/train_${array_size}.log"
   pid_path="$RESULT_ROOT/pids/train_${array_size}.pid"
-  nohup env CUDA_VISIBLE_DEVICES="$gpu" "${TRAIN_COMMAND[@]}" \
-    >"$log_path" 2>&1 </dev/null &
+  pid_temp_path="${pid_path}.tmp.$$.$index"
+  owner_fingerprint="${OWNER_FINGERPRINTS[$index]}"
+  SPAWN_RECORD_CRITICAL=1
+  (
+    close_flock_fds_for_child
+    exec nohup env CUDA_VISIBLE_DEVICES="$gpu" "${TRAIN_COMMAND[@]}"
+  ) >"$log_path" 2>&1 </dev/null &
   pid="$!"
-  LAUNCHED_PIDS+=("$pid")
+  record_index="${#CHILD_ROLLBACK_RECORDS[@]}"
+  CHILD_ROLLBACK_RECORDS+=(
+    "${pid}${CHILD_RECORD_SEPARATOR}${pid_path}${CHILD_RECORD_SEPARATOR}\
+${pid_temp_path}${CHILD_RECORD_SEPARATOR}${owner_fingerprint}\
+${CHILD_RECORD_SEPARATOR}unknown"
+  )
+  SPAWN_RECORD_CRITICAL=0
+  dispatch_pending_train_signal
   if ! start_ticks="$(capture_process_start_ticks "$pid")"; then
     echo "could not capture process birth identity for $array_size at PID $pid" >&2
     exit 1
   fi
+  set_child_record_start_ticks "$record_index" "$start_ticks" || exit 1
   if ! write_pid_metadata_atomic \
-    "$pid_path" "$pid" "$start_ticks" "${OWNER_FINGERPRINTS[$index]}"; then
+    "$pid_path" "$pid_temp_path" "$pid" "$start_ticks" "$owner_fingerprint"; then
     echo "could not publish PID metadata for $array_size at PID $pid" >&2
     exit 1
   fi
-  PUBLISHED_PID_PATHS+=("$pid_path")
-  PUBLISHED_PIDS+=("$pid")
-  PUBLISHED_START_TICKS+=("$start_ticks")
-  PUBLISHED_FINGERPRINTS+=("${OWNER_FINGERPRINTS[$index]}")
   echo "LAUNCHED ARRAY=$array_size GPU=$gpu PID=$pid LOG=$log_path"
 done
 TRANSACTION_COMMITTED=1
