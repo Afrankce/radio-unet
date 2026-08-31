@@ -27,10 +27,18 @@ def test_stage_preserves_external_shape_and_backpropagates_every_branch() -> Non
     assert output.shape == value.shape
     assert torch.isfinite(output).all()
     assert value.grad is not None and torch.isfinite(value.grad).all()
-    assert stage.spectral.weights1.grad is not None
-    assert stage.local.weight.grad is not None
-    assert stage.time_projection.weight.grad is not None
-    assert stage.attention.embedding_proj.weight.grad is not None
+    assert stage.spectral.weights1.grad is not None and torch.isfinite(
+        stage.spectral.weights1.grad
+    ).all()
+    assert stage.local.weight.grad is not None and torch.isfinite(
+        stage.local.weight.grad
+    ).all()
+    assert stage.time_projection.weight.grad is not None and torch.isfinite(
+        stage.time_projection.weight.grad
+    ).all()
+    assert stage.attention.embedding_proj.weight.grad is not None and torch.isfinite(
+        stage.attention.embedding_proj.weight.grad
+    ).all()
 
 
 def test_zero_operator_update_leaves_the_attended_residual() -> None:
@@ -44,6 +52,73 @@ def test_zero_operator_update_leaves_the_attended_residual() -> None:
         expected = stage.attention(value, condition)
         actual = stage(value, condition, time)
     assert torch.equal(actual, expected)
+
+
+def test_stage_right_bottom_pads_and_top_left_crops_operator_update() -> None:
+    torch.manual_seed(0)
+    stage = AttentionConditionedFNOStage(
+        channels=8,
+        embedding_channels=4,
+        operator_width=4,
+        modes=2,
+        padding=2,
+        attention_reduction=4,
+    ).eval()
+    value = torch.randn(1, 8, 5, 7)
+    condition = torch.randn(1, 4, 5, 7)
+    time = torch.randn(1, 512)
+    captured: dict[str, torch.Tensor] = {}
+
+    handles = (
+        stage.lifting.register_forward_hook(
+            lambda _module, _inputs, output: captured.__setitem__(
+                "lifting_output", output.detach().clone()
+            )
+        ),
+        stage.spectral.register_forward_pre_hook(
+            lambda _module, inputs: captured.__setitem__(
+                "spectral_input", inputs[0].detach().clone()
+            )
+        ),
+        stage.spectral.register_forward_hook(
+            lambda _module, _inputs, output: captured.__setitem__(
+                "spectral_output", output.detach().clone()
+            )
+        ),
+        stage.local.register_forward_hook(
+            lambda _module, _inputs, output: captured.__setitem__(
+                "local_output", output.detach().clone()
+            )
+        ),
+        stage.time_projection.register_forward_hook(
+            lambda _module, _inputs, output: captured.__setitem__(
+                "time_output", output.detach().clone()
+            )
+        ),
+        stage.projection.register_forward_pre_hook(
+            lambda _module, inputs: captured.__setitem__(
+                "projection_input", inputs[0].detach().clone()
+            )
+        ),
+    )
+    try:
+        with torch.no_grad():
+            stage(value, condition, time)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    lifted = captured["lifting_output"]
+    expected_padded = torch.zeros(1, 4, 7, 9)
+    expected_padded[..., :5, :7] = lifted
+    assert torch.equal(captured["spectral_input"], expected_padded)
+
+    full_delta = torch.nn.functional.gelu(
+        captured["spectral_output"]
+        + captured["local_output"]
+        + captured["time_output"][:, :, None, None]
+    )
+    assert torch.equal(captured["projection_input"], full_delta[..., :5, :7])
 
 
 @pytest.mark.parametrize(
