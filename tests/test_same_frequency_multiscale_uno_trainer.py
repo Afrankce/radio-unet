@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import copy
 import json
+import random
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -23,6 +27,7 @@ from training.same_frequency_multiscale_uno_trainer import (
     run_same_frequency_multiscale_uno_training,
     write_or_validate_multiscale_uno_run_config,
 )
+from training.same_frequency_trainer import SameFrequencyTrainerContractError
 
 
 class _TinyDataset(Dataset):
@@ -129,6 +134,85 @@ def _tiny_multiscale_uno(model_size: str) -> AttentionMultiscaleUNO2d:
     )
 
 
+def _nested_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, torch.Tensor):
+        return isinstance(right, torch.Tensor) and torch.equal(left, right)
+    if isinstance(left, np.ndarray):
+        return isinstance(right, np.ndarray) and np.array_equal(left, right)
+    if isinstance(left, dict):
+        return isinstance(right, dict) and left.keys() == right.keys() and all(
+            _nested_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, (tuple, list)):
+        return type(left) is type(right) and len(left) == len(right) and all(
+            _nested_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
+def _process_rng_state(generator: torch.Generator) -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+        ),
+        "train_generator": generator.get_state(),
+    }
+
+
+def _trainer_state(trainer) -> dict[str, Any]:
+    return {
+        "completed_epochs": trainer.completed_epochs,
+        "next_epoch_index": trainer.next_epoch_index,
+        "optimizer_step": trainer.optimizer_step,
+        "micro_batches_seen": trainer.micro_batches_seen,
+        "samples_seen": trainer.samples_seen,
+        "best_val_db_rmse": trainer.best_val_db_rmse,
+        "epochs_without_improvement": trainer.epochs_without_improvement,
+        "history": copy.deepcopy(trainer.history),
+    }
+
+
+def _trainer_snapshot(trainer) -> dict[str, Any]:
+    return {
+        "model": copy.deepcopy(trainer.model.state_dict()),
+        "ema": copy.deepcopy(trainer.ema.ema_model.state_dict()),
+        "optimizer": copy.deepcopy(trainer.optimizer.state_dict()),
+        "scheduler": copy.deepcopy(trainer.scheduler.state_dict()),
+        "scaler": copy.deepcopy(trainer.scaler.state_dict()),
+        "trainer_state": _trainer_state(trainer),
+        "rng_state": copy.deepcopy(_process_rng_state(trainer.train_generator)),
+    }
+
+
+def _assert_full_checkpoint_restored(trainer, payload: dict[str, Any]) -> None:
+    assert _nested_equal(trainer.model.state_dict(), payload["model"]), (
+        "model state was not fully restored"
+    )
+    assert _nested_equal(trainer.ema.ema_model.state_dict(), payload["ema"]), (
+        "EMA state was not fully restored"
+    )
+    assert _nested_equal(trainer.optimizer.state_dict(), payload["optimizer"]), (
+        "optimizer state was not fully restored"
+    )
+    assert _nested_equal(trainer.scheduler.state_dict(), payload["scheduler"]), (
+        "scheduler state was not fully restored"
+    )
+    assert _nested_equal(trainer.scaler.state_dict(), payload["scaler"]), (
+        "scaler state was not fully restored"
+    )
+    assert _nested_equal(_trainer_state(trainer), payload["trainer_state"]), (
+        "trainer counters or history were not fully restored"
+    )
+    assert _nested_equal(
+        _process_rng_state(trainer.train_generator),
+        payload["rng_state"],
+    ), "process or loader RNG state was not fully restored"
+
+
 @pytest.fixture
 def tiny_training(monkeypatch, tmp_path: Path):
     import training.same_frequency_multiscale_uno_trainer as module
@@ -192,18 +276,21 @@ def test_one_step_multiscale_uno_smoke_writes_reloadable_full_state_checkpoint(
     assert payload["rng_state"]
 
 
-def test_auto_and_explicit_resume_reload_optimizer_progress(
+def test_auto_and_explicit_resume_restore_every_checkpoint_component(
     tiny_training,
     monkeypatch,
 ) -> None:
     module, tmp_path = tiny_training
     source_cfg, smoke = _smoke_checkpoint(tmp_path)
     checkpoint = Path(smoke["checkpoint"])
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    verified_resumes: list[int] = []
 
     def finish_without_more_training(self, *, stop_after_epoch=None):
+        _assert_full_checkpoint_restored(self, payload)
+        verified_resumes.append(self.optimizer_step)
         return {
-            "optimizer_step": self.optimizer_step,
-            "optimizer_state_nonempty": bool(self.optimizer.state),
+            "full_state_verified": True,
             "stop_after_epoch": stop_after_epoch,
         }
 
@@ -225,13 +312,17 @@ def test_auto_and_explicit_resume_reload_optimizer_progress(
         torch.device("cpu"),
     )
 
-    assert source_cfg.config_sha256 == explicit_cfg.config_sha256 == auto_cfg.config_sha256
+    assert (
+        source_cfg.config_sha256
+        == explicit_cfg.config_sha256
+        == auto_cfg.config_sha256
+    )
     assert explicit == {
-        "optimizer_step": 1,
-        "optimizer_state_nonempty": True,
+        "full_state_verified": True,
         "stop_after_epoch": 1,
     }
     assert auto == explicit
+    assert verified_resumes == [1, 1]
 
 
 def test_multiscale_uno_rejects_attention_fno_checkpoint_identity(
@@ -245,11 +336,31 @@ def test_multiscale_uno_rejects_attention_fno_checkpoint_identity(
     payload["run_identity"]["model_size"] = "attention_fno_lite"
     attention_fno_checkpoint = tmp_path / "attention-fno.pt"
     torch.save(payload, attention_fno_checkpoint)
-    monkeypatch.setattr(
-        module.MultiConfigSRMTrainer,
-        "fit",
-        lambda self, *, stop_after_epoch=None: {"optimizer_step": self.optimizer_step},
-    )
+    real_trainer = module.MultiConfigSRMTrainer
+    observed: dict[str, Any] = {"load_calls": []}
+
+    class ObservedTrainer(real_trainer):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            observed["trainer"] = self
+            observed["before"] = _trainer_snapshot(self)
+
+            def instrument(target, label: str) -> None:
+                original = target.load_state_dict
+
+                def tracked(*load_args, **load_kwargs):
+                    observed["load_calls"].append(label)
+                    return original(*load_args, **load_kwargs)
+
+                monkeypatch.setattr(target, "load_state_dict", tracked)
+
+            instrument(self.model, "model")
+            instrument(self.ema.ema_model, "ema")
+            instrument(self.optimizer, "optimizer")
+            instrument(self.scheduler, "scheduler")
+            instrument(self.scaler, "scaler")
+
+    monkeypatch.setattr(module, "MultiConfigSRMTrainer", ObservedTrainer)
 
     with pytest.raises(CheckpointIdentityError, match="model_size"):
         run_same_frequency_multiscale_uno_training(
@@ -257,3 +368,57 @@ def test_multiscale_uno_rejects_attention_fno_checkpoint_identity(
             InvocationControls(resume=str(attention_fno_checkpoint), stop_after_epoch=1),
             torch.device("cpu"),
         )
+
+    trainer = observed["trainer"]
+    assert observed["load_calls"] == []
+    assert _nested_equal(_trainer_snapshot(trainer), observed["before"])
+
+
+def test_resume_none_refuses_existing_production_last_checkpoint(
+    tiny_training,
+) -> None:
+    _module, tmp_path = tiny_training
+    cfg = _config(tmp_path, run_name="production")
+    cfg.run_dir.mkdir(parents=True)
+    (cfg.run_dir / "last.pt").write_bytes(b"existing production checkpoint")
+
+    with pytest.raises(
+        SameFrequencyTrainerContractError,
+        match="resume=none refuses an existing multiscale-UNO last.pt",
+    ):
+        run_same_frequency_multiscale_uno_training(
+            cfg,
+            InvocationControls(resume="none", stop_after_epoch=1),
+            torch.device("cpu"),
+        )
+
+    assert not (cfg.run_dir / "config.json").exists()
+
+
+@pytest.mark.parametrize("existing_artifact", ["config.json", "last.pt"])
+def test_smoke_artifacts_are_isolated_from_production_run(
+    tiny_training,
+    existing_artifact: str,
+) -> None:
+    _module, tmp_path = tiny_training
+    cfg = _config(tmp_path, run_name=f"isolation-{existing_artifact.split('.')[0]}")
+    cfg.run_dir.mkdir(parents=True)
+    sentinel = cfg.run_dir / existing_artifact
+    sentinel.write_bytes(b"production sentinel")
+    absent_name = "last.pt" if existing_artifact == "config.json" else "config.json"
+    absent_production_artifact = (
+        cfg.run_dir / absent_name
+    )
+
+    result = run_same_frequency_multiscale_uno_training(
+        cfg,
+        InvocationControls(resume="none", smoke_optimizer_steps=1),
+        torch.device("cpu"),
+    )
+
+    smoke_dir = (cfg.run_root / "_smoke").resolve()
+    assert Path(result["run_dir"]) == smoke_dir
+    assert Path(result["checkpoint"]) == smoke_dir / "smoke.pt"
+    assert (smoke_dir / "config.json").is_file()
+    assert sentinel.read_bytes() == b"production sentinel"
+    assert not absent_production_artifact.exists()
