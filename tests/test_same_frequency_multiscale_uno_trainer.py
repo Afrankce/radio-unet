@@ -106,9 +106,10 @@ def _context() -> SimpleNamespace:
 def _tiny_loaders(_cfg, _context):
     generator = torch.Generator(device="cpu").manual_seed(42)
     train = DataLoader(
-        _TinyDataset(2, "train"),
+        _TinyDataset(4, "train"),
         batch_size=2,
-        shuffle=False,
+        shuffle=True,
+        generator=generator,
         collate_fn=multiconfig_collate,
         num_workers=0,
     )
@@ -207,10 +208,11 @@ def _assert_full_checkpoint_restored(trainer, payload: dict[str, Any]) -> None:
     assert _nested_equal(_trainer_state(trainer), payload["trainer_state"]), (
         "trainer counters or history were not fully restored"
     )
-    assert _nested_equal(
-        _process_rng_state(trainer.train_generator),
-        payload["rng_state"],
-    ), "process or loader RNG state was not fully restored"
+    restored_rng = _process_rng_state(trainer.train_generator)
+    for source, expected in payload["rng_state"].items():
+        assert _nested_equal(restored_rng[source], expected), (
+            f"{source} RNG state was not fully restored"
+        )
 
 
 @pytest.fixture
@@ -221,6 +223,31 @@ def tiny_training(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(module, "preflight_same_frequency", lambda _cfg: _context())
     monkeypatch.setattr(module, "build_same_frequency_loaders", _tiny_loaders)
     monkeypatch.setattr(module, "build_same_frequency_backbone", _tiny_multiscale_uno)
+    real_run_smoke = module.MultiConfigSRMTrainer.run_smoke
+
+    def run_smoke_after_advancing_all_rngs(self, optimizer_steps: int):
+        assert self.train_loader.sampler.generator is self.train_generator
+        random.random()
+        np.random.random()
+        torch.rand(())
+        if torch.cuda.is_available():
+            torch.rand((), device="cuda")
+        torch.rand((), generator=self.train_generator)
+        generator_before_shuffle = self.train_generator.get_state().clone()
+
+        result = real_run_smoke(self, optimizer_steps)
+
+        assert not torch.equal(
+            generator_before_shuffle,
+            self.train_generator.get_state(),
+        ), "the real shuffled sampler did not advance the loader generator"
+        return result
+
+    monkeypatch.setattr(
+        module.MultiConfigSRMTrainer,
+        "run_smoke",
+        run_smoke_after_advancing_all_rngs,
+    )
     return module, tmp_path
 
 
@@ -285,6 +312,37 @@ def test_auto_and_explicit_resume_restore_every_checkpoint_component(
     checkpoint = Path(smoke["checkpoint"])
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     verified_resumes: list[int] = []
+    observed: dict[str, Any] = {
+        "fresh_rng_states": [],
+        "scaler_load_payloads": [],
+    }
+    real_trainer = module.MultiConfigSRMTrainer
+
+    class ObservedResumeTrainer(real_trainer):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            real_scaler_load_state_dict = self.scaler.load_state_dict
+
+            def tracked_scaler_load_state_dict(scaler_payload):
+                observed["scaler_load_payloads"].append(
+                    copy.deepcopy(scaler_payload)
+                )
+                return real_scaler_load_state_dict(scaler_payload)
+
+            monkeypatch.setattr(
+                self.scaler,
+                "load_state_dict",
+                tracked_scaler_load_state_dict,
+            )
+
+        def resume(self, path: Path):
+            fresh_rng = copy.deepcopy(_process_rng_state(self.train_generator))
+            observed["fresh_rng_states"].append(fresh_rng)
+            for source, saved in payload["rng_state"].items():
+                assert not _nested_equal(fresh_rng[source], saved), (
+                    f"checkpoint {source} RNG state did not differ from fresh state"
+                )
+            return super().resume(path)
 
     def finish_without_more_training(self, *, stop_after_epoch=None):
         _assert_full_checkpoint_restored(self, payload)
@@ -294,7 +352,8 @@ def test_auto_and_explicit_resume_restore_every_checkpoint_component(
             "stop_after_epoch": stop_after_epoch,
         }
 
-    monkeypatch.setattr(module.MultiConfigSRMTrainer, "fit", finish_without_more_training)
+    monkeypatch.setattr(real_trainer, "fit", finish_without_more_training)
+    monkeypatch.setattr(module, "MultiConfigSRMTrainer", ObservedResumeTrainer)
 
     explicit_cfg = _config(tmp_path, run_name="explicit")
     explicit = run_same_frequency_multiscale_uno_training(
@@ -323,6 +382,10 @@ def test_auto_and_explicit_resume_restore_every_checkpoint_component(
     }
     assert auto == explicit
     assert verified_resumes == [1, 1]
+    assert len(observed["fresh_rng_states"]) == 2
+    assert len(observed["scaler_load_payloads"]) == 2
+    for scaler_payload in observed["scaler_load_payloads"]:
+        assert _nested_equal(scaler_payload, payload["scaler"])
 
 
 def test_multiscale_uno_rejects_attention_fno_checkpoint_identity(
