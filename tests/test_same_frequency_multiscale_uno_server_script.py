@@ -279,6 +279,39 @@ def _server_launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
     bin_dir.mkdir()
     env_file.write_text(
         "#!/bin/bash\n"
+        "if [[ -n \"${RADIOFLOW_TEST_LAUNCHER_PID_LOG:-}\" ]]; then\n"
+        "  printf '%s\\n' \"$$\" > \"$RADIOFLOW_TEST_LAUNCHER_PID_LOG\"\n"
+        "fi\n"
+        "if [[ -n \"${RADIOFLOW_TEST_CLEANUP_SIGNAL_MARKER:-}\" "
+        "|| -n \"${RADIOFLOW_TEST_REUSED_PID_SIGNAL_LOG:-}\" ]]; then\n"
+        "  _radioflow_cleanup_signal_marked=0\n"
+        "  kill() {\n"
+        "    local signal=\"${1:-}\" target=\"${!#}\"\n"
+        "    if [[ -n \"${RADIOFLOW_TEST_REUSED_PID_SIGNAL_LOG:-}\" "
+        "&& -n \"${RADIOFLOW_TEST_FAST_EXIT_ARRAY:-}\" "
+        "&& -f \"${RADIOFLOW_TEST_STARTED_PID_LOG:?}\" ]] "
+        "&& /usr/bin/grep -Fqx "
+        "\"${RADIOFLOW_TEST_FAST_EXIT_ARRAY} ${target}\" "
+        "\"$RADIOFLOW_TEST_STARTED_PID_LOG\"; then\n"
+        "      if [[ \"$signal\" == '-0' ]]; then\n"
+        "        return 0\n"
+        "      fi\n"
+        "      printf '%s %s\\n' \"$signal\" \"$target\" >> "
+        "\"$RADIOFLOW_TEST_REUSED_PID_SIGNAL_LOG\"\n"
+        "      builtin kill \"$signal\" "
+        "\"${RADIOFLOW_TEST_UNRELATED_SENTINEL_PID:?}\" 2>/dev/null || true\n"
+        "      return 0\n"
+        "    fi\n"
+        "    if [[ -n \"${RADIOFLOW_TEST_CLEANUP_SIGNAL_MARKER:-}\" "
+        "&& \"$signal\" == '-TERM' "
+        "&& \"$_radioflow_cleanup_signal_marked\" -eq 0 ]]; then\n"
+        "      _radioflow_cleanup_signal_marked=1\n"
+        "      printf 'cleanup\\n' > \"$RADIOFLOW_TEST_CLEANUP_SIGNAL_MARKER\"\n"
+        "      /bin/sleep \"${RADIOFLOW_TEST_CLEANUP_SIGNAL_DELAY:-0.4}\"\n"
+        "    fi\n"
+        "    builtin kill \"$@\"\n"
+        "  }\n"
+        "fi\n"
         "mv() {\n"
         "  local argument publication_target='' source_path=''\n"
         "  local pid_line publication_pid attempt\n"
@@ -326,6 +359,12 @@ def _server_launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "        if /usr/bin/grep -Fqx "
         "\"${RADIOFLOW_TEST_FAIL_START_TICKS_ARRAY} ${pid}\" "
         "\"$RADIOFLOW_TEST_STARTED_PID_LOG\"; then\n"
+        "          if [[ \"${RADIOFLOW_TEST_WAIT_FOR_FAILED_PROCESS_EXIT:-0}\" "
+        "== '1' ]]; then\n"
+        "            while [[ -e \"/proc/$pid\" ]]; do\n"
+        "              /bin/sleep 0.01\n"
+        "            done\n"
+        "          fi\n"
         "          return 1\n"
         "        fi\n"
         "        break\n"
@@ -382,6 +421,9 @@ def _server_launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "&& \"$*\" != *'--smoke-optimizer-steps'* ]]; then\n"
         "  printf '%s %s\\n' \"$array_size\" \"$$\" >> "
         "\"${RADIOFLOW_TEST_STARTED_PID_LOG:?}\"\n"
+        "  if [[ \"$array_size\" == \"${RADIOFLOW_TEST_FAST_EXIT_ARRAY:-}\" ]]; then\n"
+        "    exit 0\n"
+        "  fi\n"
         "  alive_path=\"${RADIOFLOW_TEST_ALIVE_DIR:?}/${array_size}.$$\"\n"
         "  hold_pid=''\n"
         "  cleanup() {\n"
@@ -532,6 +574,18 @@ def _wait_for_started_pids(
     return started
 
 
+def _wait_for_file_text(path: Path, *, timeout: float = 3) -> str:
+    deadline = time.monotonic() + timeout
+    value = ""
+    while time.monotonic() < deadline:
+        if path.exists():
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        time.sleep(0.02)
+    return value
+
+
 def _pid_is_alive(pid: str) -> bool:
     completed = subprocess.run(
         [_bash(), "-c", 'kill -0 "$1" 2>/dev/null', "--", pid],
@@ -600,6 +654,37 @@ def _start_server_sleep() -> tuple[subprocess.Popen[str], str]:
 
 def _stop_server_sleep(process: subprocess.Popen[str], sleep_pid: str) -> None:
     _server_shell('kill -TERM "$1" 2>/dev/null || true', sleep_pid)
+    process.wait(timeout=5)
+
+
+def _start_server_signal_sentinel(marker: Path) -> tuple[subprocess.Popen[str], str]:
+    process = subprocess.Popen(
+        [
+            *_server_prefix(),
+            "/bin/bash",
+            "-c",
+            "trap 'printf \"signal\\n\" >> \"$1\"' HUP INT TERM; "
+            "printf '%s\\n' \"$$\"; "
+            "while :; do /bin/sleep 0.1; done",
+            "radioflow-sentinel",
+            _server_path(marker),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert process.stdout is not None
+    sentinel_pid = process.stdout.readline().strip()
+    assert sentinel_pid.isdecimal()
+    return process, sentinel_pid
+
+
+def _stop_server_signal_sentinel(
+    process: subprocess.Popen[str], sentinel_pid: str
+) -> None:
+    _server_shell('kill -KILL "$1" 2>/dev/null || true', sentinel_pid)
     process.wait(timeout=5)
 
 
@@ -953,6 +1038,108 @@ def test_signal_before_second_pid_capture_defers_until_rollback_record_is_comple
         _assert_server_locks_reacquirable(pid_dir)
     finally:
         _terminate_server_pids(tracked_pids)
+
+
+def test_cleanup_ignores_repeated_handled_signals_until_rollback_finishes(
+    tmp_path: Path,
+) -> None:
+    environment, _invocation_log = _server_launcher_environment(tmp_path)
+    launcher_pid_log = tmp_path / "launcher.pid"
+    cleanup_marker = tmp_path / "cleanup-started"
+    environment["RADIOFLOW_TEST_LAUNCHER_PID_LOG"] = _server_path(launcher_pid_log)
+    environment["RADIOFLOW_TEST_CLEANUP_SIGNAL_MARKER"] = _server_path(
+        cleanup_marker
+    )
+    environment["RADIOFLOW_TEST_CLEANUP_SIGNAL_DELAY"] = "0.5"
+    environment["RADIOFLOW_TEST_PID_PUBLICATION_DELAY"] = "0.2"
+    environment["RADIOFLOW_TEST_TRAIN_HOLD_SECONDS"] = "5"
+    process = subprocess.Popen(
+        _server_command("--train", environment=environment),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    launcher_pid = ""
+    spawned: list[tuple[str, str]] = []
+    try:
+        launcher_pid = _wait_for_file_text(launcher_pid_log)
+        assert launcher_pid.isdecimal()
+        started = _wait_for_started_pids(tmp_path / "started-pids.log", 2, timeout=5)
+        assert len(started) >= 2
+
+        initial_signal = _server_shell('kill -TERM "$1"', launcher_pid)
+        assert initial_signal.returncode == 0, initial_signal.stderr
+        assert _wait_for_file_text(cleanup_marker, timeout=5) == "cleanup"
+        repeated_signals = _server_shell(
+            'for signal in HUP INT TERM HUP INT TERM; do '
+            'kill "-$signal" "$1" 2>/dev/null || true; '
+            "/bin/sleep 0.02; "
+            "done",
+            launcher_pid,
+        )
+        assert repeated_signals.returncode == 0, repeated_signals.stderr
+
+        stdout, stderr = process.communicate(timeout=10)
+        spawned = _started_pids(tmp_path / "spawned-pids.log")
+
+        assert process.returncode == 143, (stdout, stderr)
+        assert len(spawned) >= 2
+        assert all(not _server_pid_is_alive(pid) for _array_size, pid in spawned)
+        assert not list((tmp_path / "alive").iterdir())
+        pid_dir = tmp_path / "results" / "pids"
+        assert not list(pid_dir.glob("train_*.pid"))
+        assert not list(pid_dir.glob("train_*.pid.tmp.*"))
+        _assert_server_locks_reacquirable(pid_dir)
+    finally:
+        if process.poll() is None and launcher_pid:
+            _server_shell('kill -KILL "$1" 2>/dev/null || true', launcher_pid)
+            process.wait(timeout=5)
+        _terminate_server_pids(
+            [
+                pid
+                for _array_size, pid in [
+                    *spawned,
+                    *_started_pids(tmp_path / "spawned-pids.log"),
+                ]
+            ]
+        )
+
+
+def test_unknown_birth_fast_exit_never_signals_reused_unrelated_pid(
+    tmp_path: Path,
+) -> None:
+    environment, _invocation_log = _server_launcher_environment(tmp_path)
+    sentinel_marker = tmp_path / "unrelated-sentinel-signaled"
+    reused_pid_signal_log = tmp_path / "reused-pid-signals.log"
+    sentinel_process, sentinel_pid = _start_server_signal_sentinel(sentinel_marker)
+    environment["RADIOFLOW_TEST_FAIL_START_TICKS_ARRAY"] = "16x16"
+    environment["RADIOFLOW_TEST_FAST_EXIT_ARRAY"] = "16x16"
+    environment["RADIOFLOW_TEST_WAIT_FOR_FAILED_PROCESS_EXIT"] = "1"
+    environment["RADIOFLOW_TEST_REUSED_PID_SIGNAL_LOG"] = _server_path(
+        reused_pid_signal_log
+    )
+    environment["RADIOFLOW_TEST_UNRELATED_SENTINEL_PID"] = sentinel_pid
+    environment["RADIOFLOW_TEST_TRAIN_HOLD_SECONDS"] = "5"
+    spawned: list[tuple[str, str]] = []
+    try:
+        completed = _server_run("--train", environment=environment)
+        spawned = _started_pids(tmp_path / "spawned-pids.log")
+
+        assert completed.returncode != 0
+        assert [array_size for array_size, _pid in spawned] == ["8x8", "16x16"]
+        assert all(not _server_pid_is_alive(pid) for _array_size, pid in spawned)
+        assert not reused_pid_signal_log.exists()
+        assert not sentinel_marker.exists()
+        assert _server_pid_is_alive(sentinel_pid)
+        pid_dir = tmp_path / "results" / "pids"
+        assert not list(pid_dir.glob("train_*.pid"))
+        assert not list(pid_dir.glob("train_*.pid.tmp.*"))
+        _assert_server_locks_reacquirable(pid_dir)
+    finally:
+        _terminate_server_pids([pid for _array_size, pid in spawned])
+        _stop_server_signal_sentinel(sentinel_process, sentinel_pid)
 
 
 def test_second_array_pid_publication_failure_rolls_back_every_launch(

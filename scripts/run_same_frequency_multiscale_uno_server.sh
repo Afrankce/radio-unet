@@ -209,10 +209,21 @@ ${CHILD_RECORD_SEPARATOR}${CHILD_OWNER_FINGERPRINT}\
 ${CHILD_RECORD_SEPARATOR}${start_ticks}"
 }
 
+child_pid_is_active_job() {
+  local expected_pid="$1"
+  local active_pid
+  while IFS= read -r active_pid; do
+    if [[ "$active_pid" == "$expected_pid" ]]; then
+      return 0
+    fi
+  done < <(jobs -pr)
+  return 1
+}
+
 child_process_matches_record() {
   local current_start_ticks
   if [[ "$CHILD_START_TICKS" == unknown ]]; then
-    kill -0 "$CHILD_PID" 2>/dev/null
+    child_pid_is_active_job "$CHILD_PID"
     return
   fi
   current_start_ticks="$(read_process_start_ticks "$CHILD_PID")" || return 1
@@ -279,10 +290,11 @@ dispatch_pending_train_signal() {
 }
 
 finish_train_transaction() {
-  local status="$?"
+  trap '' HUP INT TERM
+  local status="$1"
   set +e
   set +u
-  trap - EXIT HUP INT TERM
+  trap - EXIT
   SPAWN_RECORD_CRITICAL=0
   if [[ "$TRANSACTION_COMMITTED" -ne 1 ]]; then
     rollback_tracked_children
@@ -372,7 +384,7 @@ for index in "${!ARRAYS[@]}"; do
   OWNER_FINGERPRINTS[$index]="$OWNER_FINGERPRINT"
 done
 
-trap finish_train_transaction EXIT
+trap 'finish_train_transaction "$?"' EXIT
 trap 'handle_train_signal 129' HUP
 trap 'handle_train_signal 130' INT
 trap 'handle_train_signal 143' TERM
