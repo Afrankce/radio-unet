@@ -123,8 +123,67 @@ def test_multiscale_uno_config_rejects_architecture_and_cfg_drift(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("state_channels", (32.0, 64, 128, 256, 256)),
+        ("operator_padding", (9, 5, 3, 2, True)),
+        ("operator_padding", [9, 5, 3, 2, 1]),
+        ("cfg_candidates", (True,)),
+        ("cfg_candidates", (1,)),
+        ("cfg_candidates", [1.0]),
+    ],
+)
+def test_multiscale_uno_config_rejects_nested_type_and_numeric_equivalence(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    """Container and element types are part of the scientific identity."""
+
+    with pytest.raises(MultiscaleUNOConfigError, match="locked"):
+        MultiscaleUNOTrainConfig(_base(tmp_path), **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "experiment",
+            "same_frequency_6.7_single_beam_attention_multiscale_uno_drift",
+        ),
+        ("model_size", "attention_multiscale_uno_large"),
+        ("backbone", "attention_conditioned_multiscale_uno3d"),
+        ("state_channels", [32, 64, 128, 256, 128]),
+        ("state_channels", [32.0, 64, 128, 256, 256]),
+        ("state_channels", {"channels": [32, 64, 128, 256, 256]}),
         ("operator_width", 32),
+        ("operator_width", 24.0),
+        ("operator_modes", [12, 12, 8, 4, 2]),
+        ("operator_modes", [12.0, 12, 8, 4, 4]),
+        ("operator_padding", [9, 5, 3, 2, 0]),
+        ("operator_padding", [9, 5, 3, 2, True]),
+        ("operator_padding", [9.0, 5, 3, 2, 1]),
+        ("operator_stages", 8),
+        ("operator_stages", 9.0),
+        ("condition_encoder", "BasicUNetEncoder_large"),
+        ("condition_encoder_features", [32, 32, 64, 128, 128, 32]),
+        ("condition_encoder_features", [32.0, 32, 64, 128, 256, 32]),
+        ("attention_modules", 8),
+        ("attention_modules", 9.0),
+        ("condition_injection", "resized_sum"),
+        ("downsample", "strided_conv"),
+        ("upsample", "transposed_conv"),
+        ("state_skip_connections", False),
+        ("state_skip_connections", 1),
         ("cfg_drop_prob", 0.0),
+        ("cfg_dropout_scope", "encoded_condition_only"),
+        ("cfg_candidates", [1.5]),
+        ("cfg_candidates", [True]),
+        ("cfg_candidates", [1]),
+        ("cfg_candidates", {"candidate": 1.0}),
+        ("tensor_parameter_count", 3_059_354),
+        ("tensor_parameter_count", 3_059_355.0),
+        ("real_scalar_parameter_count", 3_925_658),
+        ("real_scalar_parameter_count", 3_925_659.0),
+        ("fft_precision", "float16"),
     ],
 )
 def test_multiscale_uno_config_rejects_serialized_architecture_and_cfg_drift(
@@ -136,4 +195,36 @@ def test_multiscale_uno_config_rejects_serialized_architecture_and_cfg_drift(
     record[field] = value
 
     with pytest.raises(MultiscaleUNOConfigError, match=f"{field} mismatch"):
+        MultiscaleUNOTrainConfig.from_json(json.dumps(record))
+
+
+@pytest.mark.parametrize("change", ["missing", "extra"])
+def test_multiscale_uno_config_rejects_serialized_record_key_drift(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    record = MultiscaleUNOTrainConfig(_base(tmp_path)).to_record()
+    if change == "missing":
+        record.pop("operator_modes")
+    else:
+        record["unexpected_architecture_field"] = "drift"
+
+    with pytest.raises(MultiscaleUNOConfigError, match="keys mismatch"):
+        MultiscaleUNOTrainConfig.from_json(json.dumps(record))
+
+
+@pytest.mark.parametrize("change", ["missing", "extra"])
+def test_multiscale_uno_config_rejects_nested_serialized_key_drift(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    record = MultiscaleUNOTrainConfig(_base(tmp_path)).to_record()
+    normalization = dict(record["normalization"])
+    if change == "missing":
+        normalization.pop("beam_map")
+    else:
+        normalization["unexpected"] = "drift"
+    record["normalization"] = normalization
+
+    with pytest.raises(MultiscaleUNOConfigError, match="normalization mismatch"):
         MultiscaleUNOTrainConfig.from_json(json.dumps(record))

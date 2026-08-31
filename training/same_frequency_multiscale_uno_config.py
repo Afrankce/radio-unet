@@ -31,6 +31,33 @@ MULTISCALE_UNO_TENSOR_PARAMETERS = 3_059_355
 MULTISCALE_UNO_REAL_SCALAR_PARAMETERS = 3_925_659
 
 
+def _exact_type_and_value(actual: Any, expected: Any) -> bool:
+    """Compare nested configuration values without Python numeric coercion."""
+
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        if len(actual) != len(expected):
+            return False
+        unmatched = list(actual.items())
+        for expected_key, expected_value in expected.items():
+            for index, (actual_key, actual_value) in enumerate(unmatched):
+                if _exact_type_and_value(actual_key, expected_key):
+                    if not _exact_type_and_value(actual_value, expected_value):
+                        return False
+                    unmatched.pop(index)
+                    break
+            else:
+                return False
+        return not unmatched
+    if isinstance(expected, (list, tuple)):
+        return len(actual) == len(expected) and all(
+            _exact_type_and_value(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return actual == expected
+
+
 class MultiscaleUNOConfigError(ValueError):
     """The multiscale-UNO configuration differs from its locked registration."""
 
@@ -87,7 +114,7 @@ class MultiscaleUNOTrainConfig:
         labels = {"cfg_candidates": "CFG candidates"}
         for name, expected in locked.items():
             actual = getattr(self, name)
-            if actual != expected or type(actual) is not type(expected):
+            if not _exact_type_and_value(actual, expected):
                 raise MultiscaleUNOConfigError(
                     f"{labels.get(name, name)} is locked to {expected!r}, "
                     f"got {actual!r}"
@@ -211,7 +238,7 @@ class MultiscaleUNOTrainConfig:
                 f"missing={sorted(set(expected) - set(payload))}"
             )
         for key, value in expected.items():
-            if payload[key] != value:
+            if not _exact_type_and_value(payload[key], value):
                 raise MultiscaleUNOConfigError(
                     f"run config {key} mismatch: expected {value!r}, "
                     f"got {payload[key]!r}"
