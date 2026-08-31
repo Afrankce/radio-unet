@@ -63,13 +63,40 @@ def _launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
     proc_root = tmp_path / "proc"
     env_file = tmp_path / "remote_env.sh"
     invocation_log = tmp_path / "python-invocations.log"
+    started_pid_log = tmp_path / "started-pids.log"
+    alive_dir = tmp_path / "alive"
     bin_dir = tmp_path / "bin"
     code_root.mkdir()
     dataset_root.mkdir()
     proc_root.mkdir()
+    alive_dir.mkdir()
     bin_dir.mkdir()
     (code_root / "run_same_frequency_multiscale_uno.py").touch()
-    env_file.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    env_file.write_text(
+        "#!/usr/bin/env bash\n"
+        "process_dir=\"${RADIOFLOW_MULTISCALE_UNO_TEST_PROC_ROOT:?}/$$\"\n"
+        "mkdir -p \"$process_dir\"\n"
+        "fields=(S)\n"
+        "for _field in {4..21}; do fields+=(0); done\n"
+        "fields+=(\"${RADIOFLOW_TEST_LAUNCHER_START_TICKS:-313131}\")\n"
+        "printf '%s (test-launcher) %s\\n' \"$$\" \"${fields[*]}\" > \"$process_dir/stat\"\n"
+        "mv() {\n"
+        "  for argument in \"$@\"; do\n"
+        "    if [[ -n \"${RADIOFLOW_TEST_FAIL_PID_PUBLICATION_ARRAY:-}\" "
+        "&& \"$argument\" == */train_${RADIOFLOW_TEST_FAIL_PID_PUBLICATION_ARRAY}.pid ]]; then\n"
+        "      return 73\n"
+        "    fi\n"
+        "  done\n"
+        "  /usr/bin/mv \"$@\"\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "flock").write_text(
+        "#!/usr/bin/env bash\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "flock").chmod(0o755)
     (bin_dir / "python").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -94,14 +121,24 @@ def _launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "fi\n"
         "if [[ \"${3:-}\" == 'train' && \"$*\" != *'--preflight-only'* "
         "&& \"$*\" != *'--smoke-optimizer-steps'* ]]; then\n"
+        "  printf '%s %s\\n' \"$array_size\" \"$$\" >> \"${RADIOFLOW_TEST_STARTED_PID_LOG:?}\"\n"
+        "  alive_path=\"${RADIOFLOW_TEST_ALIVE_DIR:?}/${array_size}.$$\"\n"
+        "  : > \"$alive_path\"\n"
+        "  hold_pid=''\n"
+        "  trap 'rm -f \"$alive_path\"' EXIT\n"
+        "  trap '[[ -z \"$hold_pid\" ]] || kill \"$hold_pid\" 2>/dev/null; exit 143' TERM\n"
         "  sleep \"${RADIOFLOW_TEST_PROC_WRITE_DELAY:-0}\"\n"
-        "  process_dir=\"${RADIOFLOW_MULTISCALE_UNO_TEST_PROC_ROOT:?}/$$\"\n"
-        "  mkdir -p \"$process_dir\"\n"
-        "  fields=(S)\n"
-        "  for _field in {4..21}; do fields+=(0); done\n"
-        "  fields+=(\"${RADIOFLOW_TEST_PROCESS_START_TICKS:-424242}\")\n"
-        "  printf '%s (fake-python) %s\\n' \"$$\" \"${fields[*]}\" > \"$process_dir/stat\"\n"
-        "  sleep \"${RADIOFLOW_TEST_TRAIN_HOLD_SECONDS:-0.6}\"\n"
+        "  if [[ \"${RADIOFLOW_TEST_SKIP_PROC_ARRAY:-}\" != \"$array_size\" ]]; then\n"
+        "    process_dir=\"${RADIOFLOW_MULTISCALE_UNO_TEST_PROC_ROOT:?}/$$\"\n"
+        "    mkdir -p \"$process_dir\"\n"
+        "    fields=(S)\n"
+        "    for _field in {4..21}; do fields+=(0); done\n"
+        "    fields+=(\"${RADIOFLOW_TEST_PROCESS_START_TICKS:-424242}\")\n"
+        "    printf '%s (fake-python) %s\\n' \"$$\" \"${fields[*]}\" > \"$process_dir/stat\"\n"
+        "  fi\n"
+        "  sleep \"${RADIOFLOW_TEST_TRAIN_HOLD_SECONDS:-0.6}\" &\n"
+        "  hold_pid=$!\n"
+        "  wait \"$hold_pid\"\n"
         "fi\n"
         "printf 'complete %s\\n' \"$array_size\" >> \"${RADIOFLOW_TEST_INVOCATION_LOG:?}\"\n",
         encoding="utf-8",
@@ -121,6 +158,8 @@ def _launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
             "RADIOFLOW_MULTISCALE_UNO_ENV_FILE": _bash_path(env_file),
             "RADIOFLOW_MULTISCALE_UNO_TEST_PROC_ROOT": _bash_path(proc_root),
             "RADIOFLOW_TEST_INVOCATION_LOG": _bash_path(invocation_log),
+            "RADIOFLOW_TEST_STARTED_PID_LOG": _bash_path(started_pid_log),
+            "RADIOFLOW_TEST_ALIVE_DIR": _bash_path(alive_dir),
         }
     )
     return environment, invocation_log
@@ -196,6 +235,31 @@ def _stop_sleep(process: subprocess.Popen[str], sleep_pid: str) -> None:
         check=True,
     )
     process.wait(timeout=5)
+
+
+def _started_pids(path: Path) -> list[tuple[str, str]]:
+    if not path.exists():
+        return []
+    return [tuple(line.split()) for line in path.read_text(encoding="utf-8").splitlines()]  # type: ignore[list-item]
+
+
+def _pid_is_alive(pid: str) -> bool:
+    completed = subprocess.run(
+        [_bash(), "-c", 'kill -0 "$1" 2>/dev/null', "--", pid],
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _terminate_pids(pids: list[str]) -> None:
+    for pid in pids:
+        subprocess.run(
+            [_bash(), "-c", 'kill "$1" 2>/dev/null || true', "--", pid],
+            check=True,
+        )
+    deadline = time.monotonic() + 3
+    while any(_pid_is_alive(pid) for pid in pids) and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def test_dry_run_emits_three_isolated_default_training_commands() -> None:
@@ -306,20 +370,52 @@ def test_smoke_waits_for_every_array_and_propagates_a_failure(tmp_path: Path) ->
     }
 
 
-def test_train_lock_failure_releases_earlier_locks_without_launching(tmp_path: Path) -> None:
+def test_fallback_active_owner_refuses_and_releases_earlier_lock(tmp_path: Path) -> None:
     environment, invocation_log = _launcher_environment(tmp_path)
     result_root = tmp_path / "results"
     pid_dir = result_root / "pids"
     pid_dir.mkdir(parents=True)
     blocked_lock = pid_dir / "train_16x16.lock"
     blocked_lock.mkdir()
+    process, sleep_pid = _start_sleep()
+    start_ticks = 515151
+    try:
+        _write_proc_stat(tmp_path / "proc", sleep_pid, start_ticks)
+        _write_pid_metadata(
+            blocked_lock / "owner",
+            pid=sleep_pid,
+            start_ticks=start_ticks,
+            owner_fingerprint=_owner_fingerprint(environment, "16x16"),
+        )
+
+        completed = _run("--train", environment=environment)
+
+        assert completed.returncode == 1
+        assert not invocation_log.exists()
+        assert not (pid_dir / "train_8x8.lock").exists()
+        assert blocked_lock.is_dir()
+    finally:
+        _stop_sleep(process, sleep_pid)
+
+
+def test_fallback_reclaims_stale_lock_owner_before_launching(tmp_path: Path) -> None:
+    environment, invocation_log = _launcher_environment(tmp_path)
+    pid_dir = tmp_path / "results" / "pids"
+    lock_dir = pid_dir / "train_8x8.lock"
+    lock_dir.mkdir(parents=True)
+    _write_pid_metadata(
+        lock_dir / "owner",
+        pid="999999",
+        start_ticks=616161,
+        owner_fingerprint=_owner_fingerprint(environment, "8x8"),
+    )
 
     completed = _run("--train", environment=environment)
 
-    assert completed.returncode == 1
-    assert not invocation_log.exists()
-    assert not (pid_dir / "train_8x8.lock").exists()
-    assert blocked_lock.is_dir()
+    assert completed.returncode == 0, completed.stderr
+    assert len(_commands(invocation_log)) == 3
+    assert not any(pid_dir.glob("*.lock"))
+    time.sleep(0.7)
 
 
 def test_train_preflight_checks_all_owned_pids_before_any_launch(tmp_path: Path) -> None:
@@ -418,3 +514,51 @@ def test_two_concurrent_train_launchers_create_at_most_one_launch_set(
     assert len(_commands(invocation_log)) == 3
     assert not any((tmp_path / "results" / "pids").glob("*.lock"))
     time.sleep(1.0)
+
+
+def test_second_array_start_identity_failure_rolls_back_every_launch(
+    tmp_path: Path,
+) -> None:
+    environment, _invocation_log = _launcher_environment(tmp_path)
+    environment["RADIOFLOW_TEST_SKIP_PROC_ARRAY"] = "16x16"
+    environment["RADIOFLOW_TEST_TRAIN_HOLD_SECONDS"] = "3"
+    started_log = tmp_path / "started-pids.log"
+    started: list[tuple[str, str]] = []
+    try:
+        completed = _run("--train", environment=environment)
+        started = _started_pids(started_log)
+
+        assert completed.returncode != 0
+        assert [array_size for array_size, _pid in started] == ["8x8", "16x16"]
+        assert all(not _pid_is_alive(pid) for _array_size, pid in started)
+        assert not list((tmp_path / "alive").iterdir())
+        pid_dir = tmp_path / "results" / "pids"
+        assert not list(pid_dir.glob("train_*.pid"))
+        assert not list(pid_dir.glob("train_*.pid.tmp.*"))
+        assert not list(pid_dir.glob("*.lock"))
+    finally:
+        _terminate_pids([pid for _array_size, pid in started])
+
+
+def test_second_array_pid_publication_failure_rolls_back_every_launch(
+    tmp_path: Path,
+) -> None:
+    environment, _invocation_log = _launcher_environment(tmp_path)
+    environment["RADIOFLOW_TEST_TRAIN_HOLD_SECONDS"] = "3"
+    environment["RADIOFLOW_TEST_FAIL_PID_PUBLICATION_ARRAY"] = "16x16"
+    started_log = tmp_path / "started-pids.log"
+    started: list[tuple[str, str]] = []
+    try:
+        completed = _run("--train", environment=environment)
+        started = _started_pids(started_log)
+
+        assert completed.returncode != 0
+        assert [array_size for array_size, _pid in started] == ["8x8", "16x16"]
+        assert all(not _pid_is_alive(pid) for _array_size, pid in started)
+        assert not list((tmp_path / "alive").iterdir())
+        pid_dir = tmp_path / "results" / "pids"
+        assert not list(pid_dir.glob("train_*.pid"))
+        assert not list(pid_dir.glob("train_*.pid.tmp.*"))
+        assert not list(pid_dir.glob("*.lock"))
+    finally:
+        _terminate_pids([pid for _array_size, pid in started])
