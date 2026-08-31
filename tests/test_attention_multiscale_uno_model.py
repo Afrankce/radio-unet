@@ -12,6 +12,7 @@ from model.attention_multiscale_uno import (
     _Downsample2d,
     _UpsampleFuse2d,
 )
+from model.fno import count_real_scalar_parameters, count_tensor_parameters
 from model.unet.basic_unet import BasicUNetEncoder
 from model.unet.basic_unet_denose import CrossAttention, CrossAttention_old
 
@@ -60,6 +61,90 @@ def test_topology_keeps_five_native_scales_and_nine_current_attention_modules() 
     assert all(convolution.kernel_size == (1, 1) for convolution in state_convolutions)
     assert all(type(module.pool) is nn.AvgPool2d for module in model.downsamples)
     assert not any(isinstance(module, nn.ConvTranspose2d) for module in model.modules())
+
+
+def test_default_model_locks_the_scientific_multiscale_architecture_and_size() -> None:
+    model = AttentionMultiscaleUNO2d()
+    stages = _all_stages(model)
+
+    assert model.condition_channels == 3
+    assert model.state_channels == (32, 64, 128, 256, 256)
+    assert model.operator_width == 24
+    assert model.operator_modes == (12, 12, 8, 4, 4)
+    assert model.operator_padding == (9, 5, 3, 2, 1)
+    assert model.encoder_features == (32, 32, 64, 128, 256, 32)
+    assert model.cfg_drop_prob == 0.25
+    assert model.attention_reduction == 16
+    assert model.lifting.in_channels == 6
+    assert model.lifting.out_channels == 32
+    assert len(model.downsamples) == len(model.upsample_fusions) == 4
+    assert [stage._channels for stage in stages] == [
+        32,
+        64,
+        128,
+        256,
+        256,
+        256,
+        128,
+        64,
+        32,
+    ]
+    assert [stage._embedding_channels for stage in stages] == [
+        32,
+        32,
+        64,
+        128,
+        256,
+        128,
+        64,
+        32,
+        32,
+    ]
+    assert [stage._operator_width for stage in stages] == [24] * 9
+    assert [stage._modes for stage in stages] == [12, 12, 8, 4, 4, 4, 8, 12, 12]
+    assert [stage._padding for stage in stages] == [9, 5, 3, 2, 1, 2, 3, 5, 9]
+    assert [
+        (module.projection.in_channels, module.projection.out_channels)
+        for module in model.downsamples
+    ] == [(32, 64), (64, 128), (128, 256), (256, 256)]
+    assert [
+        (module.projection.in_channels, module.projection.out_channels)
+        for module in model.upsample_fusions
+    ] == [(512, 256), (384, 128), (192, 64), (96, 32)]
+
+    required_biased_projections = [
+        model.lifting,
+        model.projection_hidden,
+        model.projection_output,
+        *(module.projection for module in model.downsamples),
+        *(module.projection for module in model.upsample_fusions),
+        *(
+            projection
+            for stage in stages
+            for projection in (
+                stage.attention.embedding_proj,
+                stage.lifting,
+                stage.local,
+                stage.projection,
+            )
+        ),
+    ]
+    assert all(module.kernel_size == (1, 1) for module in required_biased_projections)
+    assert all(module.bias is not None for module in required_biased_projections)
+    assert not any(isinstance(module, nn.ConvTranspose2d) for module in model.modules())
+
+    spatial_attention_names: list[str] = []
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Conv2d) or name.startswith("condition_encoder."):
+            continue
+        if module.kernel_size == (7, 7):
+            spatial_attention_names.append(name)
+            assert name.endswith("attention.spatial_attention.conv")
+        else:
+            assert module.kernel_size == (1, 1), name
+    assert len(spatial_attention_names) == 9
+    assert count_tensor_parameters(model) == 3_059_355
+    assert count_real_scalar_parameters(model) == 3_925_659
 
 
 def test_stage_hooks_catch_accidental_full_resolution_execution() -> None:
@@ -253,7 +338,7 @@ def test_full_cfg_dropout_matches_the_explicit_unconditional_branch() -> None:
     assert torch.allclose(dropped, expected, atol=1e-6, rtol=1e-5)
 
 
-def test_sample_dropout_jointly_zeros_raw_condition_and_all_five_embeddings() -> None:
+def test_sample_dropout_masks_all_nine_native_scale_condition_injections() -> None:
     model = _tiny_model(cfg_drop_prob=0.5).train()
     condition = torch.randn(8, 3, 32, 32)
     state = torch.randn(8, 1, 32, 32)
@@ -265,7 +350,7 @@ def test_sample_dropout_jointly_zeros_raw_condition_and_all_five_embeddings() ->
             lambda _module, inputs: captured_raw.append(inputs[0][:, 1:4].detach().clone())
         )
     ]
-    for stage in [*model.encoder_stages, model.bottleneck]:
+    for stage in _all_stages(model):
         handles.append(
             stage.register_forward_pre_hook(
                 lambda _module, inputs: captured_embeddings.append(
@@ -283,7 +368,23 @@ def test_sample_dropout_jointly_zeros_raw_condition_and_all_five_embeddings() ->
     dropped = captured_raw[0].flatten(1).eq(0).all(dim=1)
     assert bool(dropped.any()) and bool((~dropped).any())
     assert torch.equal(captured_raw[0][~dropped], condition[~dropped])
-    for actual, expected in zip(captured_embeddings, baseline_embeddings):
+    expected_embeddings = [
+        baseline_embeddings[index] for index in (0, 1, 2, 3, 4, 3, 2, 1, 0)
+    ]
+    assert [actual.shape[-2:] for actual in captured_embeddings] == [
+        (32, 32),
+        (16, 16),
+        (8, 8),
+        (4, 4),
+        (2, 2),
+        (4, 4),
+        (8, 8),
+        (16, 16),
+        (32, 32),
+    ]
+    for actual, expected in zip(captured_embeddings, expected_embeddings):
+        stage_dropped = actual.flatten(1).eq(0).all(dim=1)
+        assert torch.equal(stage_dropped, dropped)
         assert torch.count_nonzero(actual[dropped]) == 0
         assert torch.equal(actual[~dropped], expected[~dropped])
 
@@ -328,6 +429,66 @@ def test_public_forward_rejects_invalid_trainer_inputs_and_embeddings() -> None:
         model(image=condition, x=state, step=torch.tensor([0.2, 0.8]))
     with pytest.raises(ValueError, match="five feature scales"):
         model(image=condition, x=state, step=0.5, embedding=[])
+
+
+def test_public_forward_rejects_nonfinite_time_and_cfg_controls() -> None:
+    model = _tiny_model().eval()
+    condition = torch.randn(1, 3, 32, 32)
+    state = torch.randn(1, 1, 32, 32)
+    embeddings = model.embed_model(condition)
+
+    for step in (float("nan"), torch.tensor([float("inf")])):
+        with pytest.raises(ValueError, match="step values must be finite"):
+            model(
+                image=condition,
+                x=state,
+                step=step,
+                embedding=embeddings,
+            )
+    for cfg_scale in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="cfg_scale must be finite"):
+            model.forward_with_cfg(
+                image=condition,
+                x=state,
+                step=0.5,
+                embedding=embeddings,
+                cfg_scale=cfg_scale,
+            )
+
+
+def test_public_forward_rejects_nondivisible_state_spatial_dimensions() -> None:
+    model = _tiny_model()
+    condition = torch.randn(1, 3, 32, 24)
+    state = torch.randn(1, 1, 32, 24)
+
+    with pytest.raises(ValueError, match="spatial dimensions must be divisible by 16"):
+        model(image=condition, x=state, step=0.5)
+
+
+def test_public_forward_rejects_wrong_native_embedding_spatial_shape() -> None:
+    model = _tiny_model()
+    condition = torch.randn(1, 3, 32, 32)
+    state = torch.randn(1, 1, 32, 32)
+    embeddings = model.embed_model(condition)
+    embeddings[3] = embeddings[3][..., :-1, :]
+
+    with pytest.raises(ValueError, match="condition embedding 3 must have shape"):
+        model(image=condition, x=state, step=0.5, embedding=embeddings)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="a genuine second device is required for device-mismatch validation",
+)
+def test_public_forward_rejects_embedding_on_a_different_real_device() -> None:
+    model = _tiny_model()
+    condition = torch.randn(1, 3, 32, 32)
+    state = torch.randn(1, 1, 32, 32)
+    embeddings = model.embed_model(condition)
+    embeddings[2] = embeddings[2].to("cuda")
+
+    with pytest.raises(ValueError, match="embedding 2 must share the state device"):
+        model(image=condition, x=state, step=0.5, embedding=embeddings)
 
 
 def test_existing_model_api_embeds_five_scales_and_propagates_checkpointing() -> None:
