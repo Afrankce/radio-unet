@@ -33,7 +33,10 @@ ENV_FILE=/home/wys/radioflow_20260823/radioflow_remote_env.sh
 
 The deployed tracked Git bundle has SHA-256 `39034e4df0e13ea55053569bf8871e106d3914e989d0a16b5fe653cb2a69a701` both locally and remotely. The remote clone was clean at `8701bedf4a63a011efe058a46ba84331cdbf2ac9`. The first preflight correctly rejected the bundle-path origin; only the new clone's `origin` was then corrected to `https://github.com/Hxxxz0/RadioFlow.git`.
 
-The old Attention-FNO roots were unchanged before and after this work: code inode/mtime `68820424` / `1787797706`, and results inode/mtime `68820804` / `1787829027`.
+The old Attention-FNO roots were unchanged before and after this work:
+
+- Code: `/home/wys/radioflow_20260823/attention-fno-singlebeam` (inode `68820424`, mtime `1787797706`).
+- Results: `/home/wys/radioflow_20260823/results/attention_fno_samefreq_6.7ghz` (inode `68820804`, mtime `1787829027`).
 
 GPU 0 was occupied by another account and was not used. Although the launcher default remains physical GPUs `0,1,2`, every live server operation used `RADIOFLOW_MULTISCALE_UNO_GPUS=1,2,3`; each child sees its assigned physical GPU through `CUDA_VISIBLE_DEVICES` and uses `--device cuda:0`.
 
@@ -87,7 +90,7 @@ No lower-batch or accumulation fallback was needed.
 
 ## Preflight and scientific identities
 
-Preflight succeeded for all arrays with split `560/80/160`, model `attention_multiscale_uno_lite`, and backbone `attention_conditioned_multiscale_uno2d`.
+The original standalone preflight succeeded before smoke, but its wall-clock line was not persisted. Each smoke `config.json` can be created only after that array's training entrypoint has passed its own preflight, so the smoke-config stat timestamps in the next section are the auditable pre-formal gate. Preflight succeeded for all arrays with split `560/80/160`, model `attention_multiscale_uno_lite`, and backbone `attention_conditioned_multiscale_uno2d`.
 
 | Array | Inferred beam | Config ID | Manifest SHA-256 | Scientific config SHA-256 |
 | --- | ---: | --- | --- | --- |
@@ -95,15 +98,25 @@ Preflight succeeded for all arrays with split `560/80/160`, model `attention_mul
 | `16x16` | 8 | `freq_6.7GHz_256TR_16beams_pattern_tr38901` | `1aed953055e9dd8be7db46b45fcbcbd42143ebd98e398433a6b37f99e858c47c` | `f86253fdb9cd7d2a3d8e24c79725df47a9ff3cac82f6602e7352d7889ad64b01` |
 | `32x32` | 32 | `freq_6.7GHz_1024TR_64beams_pattern_tr38901` | `8f8c4602b627a476ef1e91187563fe36bf6a16ec48afe1f1e189e10e1b1d84a6` | `715afb6416cb6a7cb89c7ccfb34c11f9675bdbef98badaa8bcc75278b69975ad` |
 
+After formal launch, the identical standalone preflight was explicitly re-verified from `2026-09-01T09:52:57+08:00` through `2026-09-01T09:53:12+08:00` without changing training. It returned the same beam IDs, manifests, `560/80/160` splits, and model identity. This later re-verification is corroboration only and did not precede formal launch.
+
 ## Smoke evidence
 
 All three smoke runs completed one optimizer step with 28 micro-batches and 56 samples. Each reported peak training allocation of `605852672` bytes. Each `smoke.pt` is `63163610` bytes and reload verified model, EMA, optimizer, scheduler, scaler, RNG, trainer state, and Git/config identity.
 
+The server `stat` timestamps below are UTC+8. Each config timestamp is the auditable point by which that training entrypoint's own preflight had passed. All smoke artifacts and completion logs predate the formal launch at `2026-09-01T09:30:11+08:00`.
+
+| Array | `config.json` | `smoke.pt` | Runtime metadata | Completion log |
+| --- | --- | --- | --- | --- |
+| `8x8` | `2026-09-01T09:24:17.103259+08:00` | `2026-09-01T09:24:21.659212+08:00` | `2026-09-01T09:24:21.931209+08:00` | `2026-09-01T09:24:22.707201+08:00` |
+| `16x16` | `2026-09-01T09:24:17.295257+08:00` | `2026-09-01T09:24:21.719211+08:00` | `2026-09-01T09:24:22.031208+08:00` | `2026-09-01T09:24:22.655201+08:00` |
+| `32x32` | `2026-09-01T09:24:17.119259+08:00` | `2026-09-01T09:24:21.715211+08:00` | `2026-09-01T09:24:22.031208+08:00` | `2026-09-01T09:24:22.623202+08:00` |
+
 | Array | Smoke loss | `config.json` SHA-256 | `smoke.pt` SHA-256 |
 | --- | ---: | --- | --- |
-| `8x8` | `1.3182900391642092` | `34ea6a186de1248bf76b6893b0757351baac23450a58400ca3de589dff9a632c3` | `12462a9f159d6b22e98d0802f9070906a2999b63687226accb64717478365edff` |
-| `16x16` | `1.3011826859981246` | `ae1f8004c1679b4037babd19f040260dd12f8f5b2cca136c4501bbc9e2765a074` | `c11fabc032fd0cc5996a0385740681b8a549485ab55c434b2deba4a50f2398b59` |
-| `32x32` | `1.2656011730499659` | `dfbc89b494fb885a261bbc8b8214cafc5e199f1bed60d5a71542f5ee210b2f3a` | `c929ff6b2612868697de2a6848339b2eafc59eecee789cdd31ca94d6e7cb21c8d` |
+| `8x8` | `1.3182900391642092` | `34ea6a186de1248bf76b6893b0757351bac23450a58400ca3de589dff9a632c3` | `12462a9f159d6b22e98d0802f9070906a2999b6368726accb64717478365edff` |
+| `16x16` | `1.3011826859981246` | `ae1f8004c1679b4037babd19f040260d12f8f5b2cca136c4501bbc9e2765a074` | `c11fabc032fd0cc5996a0385740681b8a549485ab5c434b2deba4a50f2398b59` |
+| `32x32` | `1.2656011730499659` | `dfbc89b494fb885a261bbc8b8214cafc5e199f1bed60d5a71542f5ee210b2f3a` | `c929ff6b2612868697de2a6848339b2eafc59eece789cdd31ca94d6e7cb21c8d` |
 
 ## Formal training launch and early health
 
@@ -111,9 +124,9 @@ The formal launcher exited 0 at `2026-09-01T09:30:11+08:00`; PID metadata is pre
 
 | Array | Formal config SHA-256 | First finite train loss | First finite validation RMSE |
 | --- | --- | ---: | ---: |
-| `8x8` | `0170ade169bd67ce5108d34a8a598256b407369914aac4f9e05ce26212f7bb895` | `1.3112550455201823` | `146.05302604196717` |
-| `16x16` | `623312f2982ae280143050983cf51701dd571b4f22db1689c3d40a08a45a25224` | `1.294079223990407` | `143.39571302237355` |
-| `32x32` | `1d3ae20e6dbca7098de3d692c519f4ae557c73fdd198341030e5a7c3b3e902f67` | `1.2589257919522308` | `138.24445381966008` |
+| `8x8` | `0170ade169bd67ce5108d34a8a598256b407369914ac4f9e05ce26212f7bb895` | `1.3112550455201823` | `146.05302604196717` |
+| `16x16` | `623312f2982ae280143050983cf51701dd571b4f2db1689c3d40a08a45a25224` | `1.294079223990407` | `143.39571302237355` |
+| `32x32` | `1d3ae20e6dbca7098de3d692c519f4ae557c73fd198341030e5a7c3b3e902f67` | `1.2589257919522308` | `138.24445381966008` |
 
 At epoch 1, `last.pt` and `best.pt` were created for all arrays and training continued. These high early validation RMSE values are expected startup observations, not final results. The `2026-09-01T09:33+08:00` evidence snapshot found all owned PIDs alive: `8x8` and `16x16` had completed epoch 2, and `32x32` had completed epoch 3. These are launch-health observations only; training, CFG selection, and test evaluation are not complete.
 
