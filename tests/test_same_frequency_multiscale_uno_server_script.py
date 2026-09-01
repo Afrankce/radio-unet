@@ -204,6 +204,9 @@ def _launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "    array_size=\"${!next}\"\n"
         "  fi\n"
         "done\n"
+        "if [[ -n \"${RADIOFLOW_TEST_GPU_LOG:-}\" ]]; then\n"
+        "  printf '%s %s\\n' \"$array_size\" \"${CUDA_VISIBLE_DEVICES:-}\" >> \"$RADIOFLOW_TEST_GPU_LOG\"\n"
+        "fi\n"
         "if [[ \"${RADIOFLOW_TEST_SMOKE_FAIL_ARRAY:-}\" == \"$array_size\" ]]; then\n"
         "  exit 9\n"
         "fi\n"
@@ -254,6 +257,7 @@ def _launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
             "RADIOFLOW_MULTISCALE_UNO_ENV_FILE": _bash_path(env_file),
             "RADIOFLOW_MULTISCALE_UNO_TEST_PROC_ROOT": _bash_path(proc_root),
             "RADIOFLOW_TEST_INVOCATION_LOG": _bash_path(invocation_log),
+            "RADIOFLOW_TEST_GPU_LOG": _bash_path(tmp_path / "gpu-mappings.log"),
             "RADIOFLOW_TEST_STARTED_PID_LOG": _bash_path(started_pid_log),
             "RADIOFLOW_TEST_ALIVE_DIR": _bash_path(alive_dir),
         }
@@ -417,6 +421,9 @@ def _server_launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "    array_size=\"${!next}\"\n"
         "  fi\n"
         "done\n"
+        "if [[ -n \"${RADIOFLOW_TEST_GPU_LOG:-}\" ]]; then\n"
+        "  printf '%s %s\\n' \"$array_size\" \"${CUDA_VISIBLE_DEVICES:-}\" >> \"$RADIOFLOW_TEST_GPU_LOG\"\n"
+        "fi\n"
         "if [[ \"${1:-}\" == 'train' && \"$*\" != *'--preflight-only'* "
         "&& \"$*\" != *'--smoke-optimizer-steps'* ]]; then\n"
         "  printf '%s %s\\n' \"$array_size\" \"$$\" >> "
@@ -474,6 +481,7 @@ def _server_launcher_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "RADIOFLOW_MULTISCALE_UNO_RESULT_ROOT": _server_path(result_root),
         "RADIOFLOW_MULTISCALE_UNO_ENV_FILE": _server_path(env_file),
         "RADIOFLOW_TEST_INVOCATION_LOG": _server_path(invocation_log),
+        "RADIOFLOW_TEST_GPU_LOG": _server_path(tmp_path / "gpu-mappings.log"),
         "RADIOFLOW_TEST_STARTED_PID_LOG": _server_path(started_pid_log),
         "RADIOFLOW_TEST_SPAWNED_PID_LOG": _server_path(spawned_pid_log),
         "RADIOFLOW_TEST_ALIVE_DIR": _server_path(alive_dir),
@@ -744,6 +752,91 @@ def test_dry_run_emits_three_isolated_default_training_commands() -> None:
         assert f"manifest_samefreq_6.7ghz_{array_size}_0deg.jsonl" in line
         assert f"multiscale_uno_samefreq_6.7ghz/runs/{array_size}" in line.replace("\\", "/")
     assert "/home/wys/radioflow_20260823/multiscale-uno-singlebeam" in lines[0]
+
+
+def test_dry_run_uses_the_explicit_gpu_mapping() -> None:
+    environment = dict(os.environ)
+    environment["RADIOFLOW_MULTISCALE_UNO_GPUS"] = "1,2,3"
+
+    completed = _run("--dry-run", environment=environment)
+
+    assert completed.returncode == 0, completed.stderr
+    lines = completed.stdout.splitlines()
+    assert len(lines) == 3
+    for line, (array_size, gpu) in zip(
+        lines, zip(ARRAYS, ("1", "2", "3"))
+    ):
+        assert line.startswith(f"CUDA_VISIBLE_DEVICES={gpu} python ")
+        assert f"--array-size {array_size}" in line
+        assert "--device cuda:0" in line
+
+
+@pytest.mark.parametrize("mode", ("--preflight", "--smoke", "--select-cfg", "--test"))
+def test_non_train_gpu_modes_use_the_explicit_gpu_mapping(
+    tmp_path: Path, mode: str
+) -> None:
+    environment, invocation_log = _launcher_environment(tmp_path)
+    environment["RADIOFLOW_MULTISCALE_UNO_GPUS"] = "1,2,3"
+
+    completed = _run(mode, environment=environment)
+
+    assert completed.returncode == 0, completed.stderr
+    gpu_log = tmp_path / "gpu-mappings.log"
+    assert gpu_log.read_text(encoding="utf-8").splitlines() == [
+        "8x8 1",
+        "16x16 2",
+        "32x32 3",
+    ]
+    assert all("--device cuda:0" in command for command in _commands(invocation_log))
+
+
+def test_train_uses_the_explicit_gpu_mapping(tmp_path: Path) -> None:
+    environment, _invocation_log = _server_launcher_environment(tmp_path)
+    environment["RADIOFLOW_MULTISCALE_UNO_GPUS"] = "1,2,3"
+    started: list[tuple[str, str]] = []
+    try:
+        completed = _server_run("--train", environment=environment)
+        started = _wait_for_started_pids(tmp_path / "started-pids.log", 3)
+
+        assert completed.returncode == 0, completed.stderr
+        assert (tmp_path / "gpu-mappings.log").read_text(encoding="utf-8").splitlines() == [
+            "8x8 1",
+            "16x16 2",
+            "32x32 3",
+        ]
+    finally:
+        _terminate_server_pids([pid for _array_size, pid in started])
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    (
+        "1,2",
+        "1,2,3,4",
+        "1,1,2",
+        "-1,2,3",
+        "1, 2,3",
+        "1,2,3 ",
+        "1,2,3; touch injected-marker",
+    ),
+)
+def test_gpu_mapping_rejects_unsafe_values_before_mode_side_effects(
+    tmp_path: Path, mapping: str
+) -> None:
+    environment, invocation_log = _launcher_environment(tmp_path)
+    marker = tmp_path / "injected-marker"
+    environment["RADIOFLOW_MULTISCALE_UNO_GPUS"] = mapping.replace(
+        "injected-marker", _bash_path(marker)
+    )
+
+    completed = _run("--preflight", environment=environment)
+
+    assert completed.returncode == 2
+    assert "RADIOFLOW_MULTISCALE_UNO_GPUS must contain exactly three unique" in completed.stderr
+    assert not invocation_log.exists()
+    assert not marker.exists()
+    assert not (tmp_path / "results").exists()
+    assert not any((tmp_path / "proc").iterdir())
 
 
 def test_dry_run_exposes_root_overrides_in_the_emitted_commands(tmp_path: Path) -> None:

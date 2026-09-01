@@ -27,6 +27,22 @@ HEIGHT_STATS="$MANIFEST_ROOT/height_stats_train.json"
 ARRAYS=(8x8 16x16 32x32)
 GPUS=(0 1 2)
 
+invalid_gpu_mapping() {
+  echo "RADIOFLOW_MULTISCALE_UNO_GPUS must contain exactly three unique non-negative integer IDs separated by commas" >&2
+  exit 2
+}
+
+if [[ -n "${RADIOFLOW_MULTISCALE_UNO_GPUS+x}" ]]; then
+  gpu_mapping="$RADIOFLOW_MULTISCALE_UNO_GPUS"
+  IFS=, read -r -a GPUS <<< "$gpu_mapping"
+  [[ ${#GPUS[@]} -eq 3 ]] || invalid_gpu_mapping
+  for gpu in "${GPUS[@]}"; do
+    [[ "$gpu" =~ ^(0|[1-9][0-9]*)$ ]] || invalid_gpu_mapping
+  done
+  [[ "${GPUS[0]}" != "${GPUS[1]}" && "${GPUS[0]}" != "${GPUS[2]}" && \
+    "${GPUS[1]}" != "${GPUS[2]}" ]] || invalid_gpu_mapping
+fi
+
 build_train_command() {
   local array_size="$1"
   TRAIN_COMMAND=(
