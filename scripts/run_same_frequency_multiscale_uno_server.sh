@@ -34,11 +34,9 @@ invalid_gpu_mapping() {
 
 if [[ -n "${RADIOFLOW_MULTISCALE_UNO_GPUS+x}" ]]; then
   gpu_mapping="$RADIOFLOW_MULTISCALE_UNO_GPUS"
+  [[ "$gpu_mapping" =~ ^(0|[1-9][0-9]*),(0|[1-9][0-9]*),(0|[1-9][0-9]*)$ ]] || \
+    invalid_gpu_mapping
   IFS=, read -r -a GPUS <<< "$gpu_mapping"
-  [[ ${#GPUS[@]} -eq 3 ]] || invalid_gpu_mapping
-  for gpu in "${GPUS[@]}"; do
-    [[ "$gpu" =~ ^(0|[1-9][0-9]*)$ ]] || invalid_gpu_mapping
-  done
   [[ "${GPUS[0]}" != "${GPUS[1]}" && "${GPUS[0]}" != "${GPUS[2]}" && \
     "${GPUS[1]}" != "${GPUS[2]}" ]] || invalid_gpu_mapping
 fi

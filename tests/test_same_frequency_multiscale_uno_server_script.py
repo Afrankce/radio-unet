@@ -813,8 +813,12 @@ def test_train_uses_the_explicit_gpu_mapping(tmp_path: Path) -> None:
     (
         "1,2",
         "1,2,3,4",
+        "1,2,3,",
+        "1,,2",
         "1,1,2",
         "-1,2,3",
+        "+1,2,3",
+        "01,2,3",
         "1, 2,3",
         "1,2,3 ",
         "1,2,3; touch injected-marker",
