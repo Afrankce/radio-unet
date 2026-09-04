@@ -37,7 +37,7 @@ from experiments.provenance import (
     assert_radioflow_checkout,
     sha256_file,
 )
-from train import ModelEMA
+from training.ema import ModelEMA
 from training.checkpointing import (
     CheckpointIdentity,
     TrainerState,

@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from train import ModelEMA
+from training.ema import ModelEMA
 from training.checkpointing import load_checkpoint_strict
 from training.complex_grad_scaler import ComplexGradScaler
 from training.config import InvocationControls
