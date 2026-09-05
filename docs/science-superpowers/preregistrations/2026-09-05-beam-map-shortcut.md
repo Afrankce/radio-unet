@@ -1,6 +1,6 @@
 # Pre-registration: Beam map 条件捷径消融
 
-**Frozen at commit:** pending
+**Frozen at commit:** ca1a4f3b9911d9693f312deb77f1190795351e89
 **Question doc:** `docs/science-superpowers/questions/2026-09-05-beam-map-shortcut.md`
 **Analysis plan:** `docs/science-superpowers/plans/2026-09-05-beam-map-shortcut.md`
 
