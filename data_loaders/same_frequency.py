@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import torch
 from torch.utils.data import Dataset
@@ -29,6 +29,10 @@ from data_loaders.multiconfig import (
 from experiments.cross_frequency import TEST_FREQUENCY_HZ
 from experiments.multiconfig_manifest import ARRAY_SPECS, ManifestRecord, load_manifest_jsonl
 from experiments.provenance import sha256_file
+
+
+ConditionVariant = Literal["full", "beam_zero"]
+CONDITION_VARIANTS: tuple[ConditionVariant, ...] = ("full", "beam_zero")
 
 
 class SameFrequencyDatasetError(RuntimeError):
@@ -97,6 +101,7 @@ class SameFrequencyRadiomapDataset(Dataset):
         expected_counts: Mapping[str, int] | None = None,
         source_metadata: Mapping[str, Any] | None = None,
         output_size: tuple[int, int] = OUTPUT_SIZE,
+        condition_variant: ConditionVariant = "full",
     ) -> None:
         if split not in ("train", "val", "test"):
             raise SameFrequencyDatasetError(f"invalid split: {split!r}")
@@ -112,12 +117,18 @@ class SameFrequencyRadiomapDataset(Dataset):
             raise SameFrequencyDatasetError(
                 f"same-frequency experiment is locked to {TEST_FREQUENCY_HZ} Hz"
             )
+        if condition_variant not in CONDITION_VARIANTS:
+            raise SameFrequencyDatasetError(
+                f"condition_variant must be one of {CONDITION_VARIANTS}, "
+                f"got {condition_variant!r}"
+            )
         self.dataset_root = Path(dataset_root).resolve()
         self.manifest_path = Path(manifest_path).resolve()
         self.split = split
         self.array_size = array_size
         self.height_max = float(height_max)
         self.output_size = OUTPUT_SIZE
+        self.condition_variant = condition_variant
         counts = dict(expected_counts or {"train": 560, "val": 80, "test": 160})
         if set(counts) != {"train", "val", "test"} or any(
             isinstance(value, bool) or int(value) <= 0 for value in counts.values()
@@ -230,6 +241,8 @@ class SameFrequencyRadiomapDataset(Dataset):
         beam = torch.from_numpy(beam_array.astype("float32", copy=False))
         beam = normalize_db(beam).unsqueeze(0).unsqueeze(0)
         beam = resize_continuous(beam, self.output_size)[0]
+        if self.condition_variant == "beam_zero":
+            beam = torch.zeros_like(beam)
 
         target_array = _load_npy(
             target_path,
@@ -251,6 +264,7 @@ class SameFrequencyRadiomapDataset(Dataset):
             "tx_rc": [self.tx_rc[0], self.tx_rc[1]],
             "array_size": self.array_size,
             "beam_id": self.beam_id,
+            "condition_variant": self.condition_variant,
         }
         return {
             "condition": condition.to(dtype=torch.float32),
@@ -261,6 +275,8 @@ class SameFrequencyRadiomapDataset(Dataset):
 
 
 __all__ = [
+    "CONDITION_VARIANTS",
+    "ConditionVariant",
     "SameFrequencyDatasetError",
     "SameFrequencyRadiomapDataset",
     "load_same_frequency_height_max",

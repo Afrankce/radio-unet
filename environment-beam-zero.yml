@@ -1,0 +1,14 @@
+name: radioflow-beam-zero
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.20
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.5.1+cu121
+      - numpy==1.26.4
+      - matplotlib==3.9.2
+      - monai==1.4.0
+      - torchcfm==1.0.7
+      - torchsummary==1.5.1

@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 
 from data_loaders.multiconfig import multiconfig_collate
 from data_loaders.same_frequency import (
+    CONDITION_VARIANTS,
     SameFrequencyRadiomapDataset,
     load_same_frequency_height_max,
 )
@@ -152,6 +153,11 @@ def preflight_same_frequency(cfg: SameFrequencyTrainConfig) -> SameFrequencyCont
     dataset_root = cfg.dataset_root.resolve()
     manifest_path = cfg.manifest_path.resolve()
     stats_path = cfg.height_stats_path.resolve()
+    condition_variant = getattr(cfg, "condition_variant", "full")
+    if condition_variant not in CONDITION_VARIANTS:
+        raise SameFrequencyTrainerContractError(
+            f"unsupported condition variant: {condition_variant!r}"
+        )
     if not manifest_path.is_file():
         raise SameFrequencyTrainerContractError(
             f"same-frequency manifest is missing: {manifest_path}"
@@ -207,6 +213,7 @@ def preflight_same_frequency(cfg: SameFrequencyTrainConfig) -> SameFrequencyCont
                 expected_beam_id=cfg.beam_id,
                 expected_counts=counts,
                 source_metadata=source_metadata,
+                condition_variant=condition_variant,
             )
         except Exception as error:
             raise SameFrequencyTrainerContractError(
@@ -220,6 +227,11 @@ def preflight_same_frequency(cfg: SameFrequencyTrainConfig) -> SameFrequencyCont
         if tuple(sample["condition"].shape) != (3, 256, 256):
             raise SameFrequencyTrainerContractError(
                 f"{split} condition shape must be (3,256,256)"
+            )
+        beam_nonzero = bool(torch.count_nonzero(sample["condition"][2]))
+        if condition_variant == "beam_zero" and beam_nonzero:
+            raise SameFrequencyTrainerContractError(
+                f"{split} beam-zero condition contains a nonzero beam pixel"
             )
         if tuple(sample["target"].shape) != (1, 256, 256):
             raise SameFrequencyTrainerContractError(

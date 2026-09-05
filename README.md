@@ -105,11 +105,42 @@ python run_same_frequency_multiscale_uno.py test \
 `results-root` 在正式测试前必须不存在；评估器用原子目录事务写入指标、逐样本预测
 和可视化。三卡并行示例见 `scripts/run_three_arrays.sh`。
 
+## Beam-zero 条件消融
+
+为检验固定 beam map 是否成为压制建筑传播学习的条件捷径，消融分支保持
+`[B,3,256,256]` 输入和全部模型参数不变，仅在归一化后将第三通道替换为零：
+
+```text
+Full:      [Tx mask, height, beam map]
+Beam-zero: [Tx mask, height, zeros_like(beam map)]
+```
+
+单阵列命令在上述训练/评估命令中追加
+`--condition-variant beam_zero`；三阵列并行入口为
+`scripts/run_beam_zero_ablation.sh`。运行目录必须与 Full 完全分离。
+
+建筑邻域比较在全部测试预测生成后运行：
+
+```bash
+python analyze_beam_ablation.py \
+  --dataset-root /path/to/MultiConfigRadiomap \
+  --manifest-dir /path/to/manifests \
+  --full-results-root /path/to/full/results \
+  --beam-zero-results-root /path/to/beam-zero/results \
+  --output /path/to/beam-zero/results/region_comparison.json
+```
+
+假设、5 像素建筑邻域、0.25 dB 最小实际差异和停止规则已经在查看新结果前
+冻结，详见下列研究文档。本地验证环境记录在 `environment-beam-zero.yml`。
+
 ## 文档
 
 - [架构与数据流](docs/ARCHITECTURE.md)
 - [复现实验](docs/REPRODUCE.md)
 - [已完成结果](docs/RESULTS.md)
+- [Beam map 条件捷径问题](docs/science-superpowers/questions/2026-09-05-beam-map-shortcut.md)
+- [Beam-zero 消融分析计划](docs/science-superpowers/plans/2026-09-05-beam-map-shortcut.md)
+- [冻结的 Beam-zero 预注册](docs/science-superpowers/preregistrations/2026-09-05-beam-map-shortcut.md)
 - [发布整理说明](RELEASE_NOTES.md)
 
 ## 代码入口

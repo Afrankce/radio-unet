@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from experiments.multiconfig_manifest import canonical_json_bytes
 from training.config import InvocationControls
@@ -29,6 +29,11 @@ MULTISCALE_UNO_CFG_DROP_PROB = 0.25
 MULTISCALE_UNO_CFG_CANDIDATES = (1.0,)
 MULTISCALE_UNO_TENSOR_PARAMETERS = 3_059_355
 MULTISCALE_UNO_REAL_SCALAR_PARAMETERS = 3_925_659
+ConditionVariant = Literal["full", "beam_zero"]
+MULTISCALE_UNO_CONDITION_VARIANTS: tuple[ConditionVariant, ...] = (
+    "full",
+    "beam_zero",
+)
 
 
 def _exact_type_and_value(actual: Any, expected: Any) -> bool:
@@ -67,6 +72,7 @@ class MultiscaleUNOTrainConfig:
     """Multiscale-UNO identity layered over the dense single-beam protocol."""
 
     base: SameFrequencyTrainConfig
+    condition_variant: ConditionVariant = "full"
     backbone: str = MULTISCALE_UNO_BACKBONE
     state_channels: tuple[int, int, int, int, int] = MULTISCALE_UNO_STATE_CHANNELS
     operator_width: int = MULTISCALE_UNO_OPERATOR_WIDTH
@@ -92,6 +98,11 @@ class MultiscaleUNOTrainConfig:
             raise MultiscaleUNOConfigError("base must be a SameFrequencyTrainConfig")
         if self.base.model_size != "lite":
             raise MultiscaleUNOConfigError("base model_size must be 'lite'")
+        if self.condition_variant not in MULTISCALE_UNO_CONDITION_VARIANTS:
+            raise MultiscaleUNOConfigError(
+                "condition_variant must be one of "
+                f"{MULTISCALE_UNO_CONDITION_VARIANTS}, got {self.condition_variant!r}"
+            )
         locked: dict[str, Any] = {
             "backbone": MULTISCALE_UNO_BACKBONE,
             "state_channels": MULTISCALE_UNO_STATE_CHANNELS,
@@ -134,6 +145,7 @@ class MultiscaleUNOTrainConfig:
     def with_run_root(self, run_root: str | Path) -> "MultiscaleUNOTrainConfig":
         return MultiscaleUNOTrainConfig(
             replace(self.base, run_root=Path(run_root)),
+            condition_variant=self.condition_variant,
             backbone=self.backbone,
             state_channels=self.state_channels,
             operator_width=self.operator_width,
@@ -180,6 +192,19 @@ class MultiscaleUNOTrainConfig:
                 "fft_precision": "float32",
             }
         )
+        if self.condition_variant == "beam_zero":
+            payload.update(
+                {
+                    "experiment": (
+                        "same_frequency_6.7_single_beam_"
+                        "attention_multiscale_uno_beam_zero"
+                    ),
+                    "condition_variant": "beam_zero",
+                    "beam_condition": (
+                        "zeros_like_after_normalization_preserve_three_channels"
+                    ),
+                }
+            )
         return payload
 
     @property
@@ -224,7 +249,8 @@ class MultiscaleUNOTrainConfig:
                     array_size=payload["array_size"],
                     beam_id=int(payload["beam_id"]),
                     model_size="lite",
-                )
+                ),
+                condition_variant=payload.get("condition_variant", "full"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise MultiscaleUNOConfigError(
@@ -254,6 +280,7 @@ __all__ = [
     "MULTISCALE_UNO_CONDITION_ENCODER",
     "MULTISCALE_UNO_CONDITION_ENCODER_FEATURES",
     "MULTISCALE_UNO_CONDITION_INJECTION",
+    "MULTISCALE_UNO_CONDITION_VARIANTS",
     "MULTISCALE_UNO_DOWNSAMPLE",
     "MULTISCALE_UNO_MODEL_SIZE",
     "MULTISCALE_UNO_OPERATOR_MODES",
@@ -267,4 +294,5 @@ __all__ = [
     "MULTISCALE_UNO_UPSAMPLE",
     "MultiscaleUNOConfigError",
     "MultiscaleUNOTrainConfig",
+    "ConditionVariant",
 ]

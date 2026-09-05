@@ -118,6 +118,7 @@ def run_same_frequency_multiscale_uno_training(
             "status": "preflight_complete",
             "backbone": cfg.backbone,
             "model_size": cfg.model_size,
+            "condition_variant": cfg.condition_variant,
             "manifest": str(context.manifest_path),
             "manifest_sha256": context.manifest_sha256,
             "array_size": cfg.array_size,

@@ -12,7 +12,10 @@ from evaluation.same_frequency_evaluator import run_cfg_selection, run_test_eval
 from training.config import InvocationControls
 from training.multiconfig_trainer import resolve_device
 from training.same_frequency_config import SameFrequencyTrainConfig
-from training.same_frequency_multiscale_uno_config import MultiscaleUNOTrainConfig
+from training.same_frequency_multiscale_uno_config import (
+    MULTISCALE_UNO_CONDITION_VARIANTS,
+    MultiscaleUNOTrainConfig,
+)
 from training.same_frequency_multiscale_uno_trainer import (
     run_same_frequency_multiscale_uno_training,
 )
@@ -33,6 +36,12 @@ def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
         required=True,
     )
     parser.add_argument("--device", required=True)
+    parser.add_argument(
+        "--condition-variant",
+        choices=MULTISCALE_UNO_CONDITION_VARIANTS,
+        default="full",
+        help="keep the full condition or zero only the beam-map channel",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -99,7 +108,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             array_size=arguments.array_size,
             beam_id=beam_id,
             model_size="lite",
-        )
+        ),
+        condition_variant=arguments.condition_variant,
     )
     device = resolve_device(arguments.device)
     if arguments.command == "train":
